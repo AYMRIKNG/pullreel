@@ -3,7 +3,7 @@ __pycache__/
 *.pyc
 dist/
 out*/
-diffreel-out/
+pullreel-out/
 *.mp4
 *.gif
 !docs/*.gif

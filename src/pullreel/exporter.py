@@ -44,7 +44,7 @@ def _runs(exe: str) -> bool:
 
 def _cache_dir() -> Path:
     base = os.environ.get("LOCALAPPDATA") if sys.platform == "win32" else os.environ.get("XDG_CACHE_HOME")
-    return Path(base) / "diffreel" if base else Path.home() / ".cache" / "diffreel"
+    return Path(base) / "pullreel" if base else Path.home() / ".cache" / "pullreel"
 
 
 @functools.cache

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from diffreel.models import ActionStep, Camera, Locator, Storyboard
-from diffreel.storyboard_agent import (
+from pullreel.models import ActionStep, Camera, Locator, Storyboard
+from pullreel.storyboard_agent import (
     InteractiveElement,
     PageSnapshot,
     extract_json,
@@ -78,7 +78,7 @@ def test_fuzzy_match_recovers_wording_drift() -> None:
 
 
 def test_parse_model_spec(monkeypatch: pytest.MonkeyPatch) -> None:
-    for var in ("OLLAMA_HOST", "DIFFREEL_BASE_URL", "DIFFREEL_API_KEY", "OPENAI_API_KEY"):
+    for var in ("OLLAMA_HOST", "PULLREEL_BASE_URL", "PULLREEL_API_KEY", "OPENAI_API_KEY"):
         monkeypatch.delenv(var, raising=False)
     cfg = parse_model_spec("ollama/qwen2.5-coder:7b")
     assert (cfg.model, cfg.base_url, cfg.api_key) == ("qwen2.5-coder:7b", "http://localhost:11434/v1", None)

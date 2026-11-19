@@ -1,4 +1,4 @@
-"""Typed data contracts shared by every DiffReel stage.
+"""Typed data contracts shared by every PullReel stage.
 
 ``Storyboard`` is the exact JSON contract the storyboard agent (LLM) produces; ``Recording`` is what the
 browser runner hands to the cinema engine and can be saved to disk to re-render without re-recording.

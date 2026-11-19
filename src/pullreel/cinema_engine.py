@@ -21,7 +21,7 @@ import numpy as np
 from numpy.typing import NDArray
 from PIL import Image, ImageDraw
 
-from diffreel.models import Recording, RenderSettings, StudioTheme, TelemetryFrame
+from pullreel.models import Recording, RenderSettings, StudioTheme, TelemetryFrame
 
 Frame = NDArray[np.uint8]
 FloatImg = NDArray[np.float32]

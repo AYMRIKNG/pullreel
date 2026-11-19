@@ -1,4 +1,4 @@
-"""Git diff analysis and UI signal extraction for DiffReel.
+"""Git diff analysis and UI signal extraction for PullReel.
 
 Inspects a repository's diff against a base branch (optionally including uncommitted
 worktree edits and untracked files), filters out noise (lockfiles, build artifacts,
@@ -14,7 +14,7 @@ import subprocess
 from collections.abc import Iterable, Sequence
 from pathlib import Path, PurePosixPath
 
-from diffreel.models import ChangedFile, DiffSummary, FileStatus
+from pullreel.models import ChangedFile, DiffSummary, FileStatus
 
 __all__ = [
     "GitError",

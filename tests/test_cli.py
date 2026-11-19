@@ -4,8 +4,8 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from diffreel.cli import _outputs, _start_url, app, demo_storyboard
-from diffreel.models import Storyboard
+from pullreel.cli import _outputs, _start_url, app, demo_storyboard
+from pullreel.models import Storyboard
 
 
 def test_outputs_from_extension(tmp_path: Path) -> None:
@@ -40,7 +40,7 @@ def test_help_lists_all_commands() -> None:
 def test_version_works_without_a_command() -> None:
     result = CliRunner().invoke(app, ["--version"])
     assert result.exit_code == 0
-    assert "diffreel 0.1.0" in result.output
+    assert "pullreel 0.1.0" in result.output
 
 
 def test_record_requires_url() -> None:
@@ -51,4 +51,4 @@ def test_record_requires_url() -> None:
 def test_diff_reports_git_errors_cleanly(tmp_path: Path) -> None:
     result = CliRunner().invoke(app, ["diff", "--repo", str(tmp_path)])
     assert result.exit_code == 1
-    assert "DiffReel failed" in result.output
+    assert "PullReel failed" in result.output

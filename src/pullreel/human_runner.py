@@ -29,7 +29,7 @@ from playwright.async_api import Browser, CDPSession, Locator as PWLocator, Page
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import async_playwright
 
-from diffreel.models import (
+from pullreel.models import (
     ActionStep,
     Box,
     CameraMode,

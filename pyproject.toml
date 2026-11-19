@@ -1,5 +1,5 @@
 [project]
-name = "diffreel"
+name = "pullreel"
 version = "0.1.0"
 description = "Turn a git diff into a cinematic, ScreenStudio-style UI demo video for your Pull Request."
 readme = "README.md"
@@ -25,14 +25,14 @@ dependencies = [
 ]
 
 [project.scripts]
-diffreel = "diffreel.cli:app"
+pullreel = "pullreel.cli:app"
 
 [build-system]
 requires = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/diffreel"]
+packages = ["src/pullreel"]
 
 [dependency-groups]
 dev = ["pytest>=8"]

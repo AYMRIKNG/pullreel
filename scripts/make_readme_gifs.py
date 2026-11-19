@@ -1,10 +1,10 @@
 """Build the README before/after GIFs from one kept recording.
 
-    uv run diffreel demo --out docs --keep-frames
+    uv run pullreel demo --out docs --keep-frames
     uv run python scripts/make_readme_gifs.py <kept-dir> docs
 
 "before.gif" is what a plain headless capture gives you: the same screencast frames, no cursor, no camera, no frame.
-"after.gif" is DiffReel's render of the same recording. Both share width and frame rate so they sit side by side.
+"after.gif" is PullReel's render of the same recording. Both share width and frame rate so they sit side by side.
 """
 
 from __future__ import annotations
@@ -17,9 +17,9 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from diffreel.cinema_engine import CinemaEngine
-from diffreel.exporter import export_mp4, find_ffmpeg
-from diffreel.models import Recording, StudioTheme
+from pullreel.cinema_engine import CinemaEngine
+from pullreel.exporter import export_mp4, find_ffmpeg
+from pullreel.models import Recording, StudioTheme
 
 WIDTH, FPS = 640, 24
 

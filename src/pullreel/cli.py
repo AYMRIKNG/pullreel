@@ -1,4 +1,4 @@
-"""DiffReel command line: `record`, `plan`, `render`, `diff` and the zero-config `demo`."""
+"""PullReel command line: `record`, `plan`, `render`, `diff` and the zero-config `demo`."""
 
 from __future__ import annotations
 
@@ -19,19 +19,19 @@ from rich.panel import Panel
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.table import Table
 
-from diffreel import __version__
-from diffreel.cinema_engine import CinemaEngine
-from diffreel.diff_analyzer import GitError, analyze_diff
-from diffreel.exporter import ExportError, export_gif, export_mp4, export_poster, find_ffmpeg, probe
-from diffreel.human_runner import StepError, record_sync
-from diffreel.models import ActionStep, Camera, DiffSummary, Locator, Recording, Storyboard, StudioTheme
-from diffreel.storyboard_agent import LLMError, PlanError, PlanResult, parse_model_spec, plan_storyboard_sync
+from pullreel import __version__
+from pullreel.cinema_engine import CinemaEngine
+from pullreel.diff_analyzer import GitError, analyze_diff
+from pullreel.exporter import ExportError, export_gif, export_mp4, export_poster, find_ffmpeg, probe
+from pullreel.human_runner import StepError, record_sync
+from pullreel.models import ActionStep, Camera, DiffSummary, Locator, Recording, Storyboard, StudioTheme
+from pullreel.storyboard_agent import LLMError, PlanError, PlanResult, parse_model_spec, plan_storyboard_sync
 
 app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
     rich_markup_mode="rich",
-    help="[bold]DiffReel[/] - turn a git diff into a cinematic UI demo for your Pull Request.",
+    help="[bold]PullReel[/] - turn a git diff into a cinematic UI demo for your Pull Request.",
 )
 console = Console()
 
@@ -45,18 +45,18 @@ BaseOpt = Annotated[str, typer.Option("--base", "-b", help="Base branch to diff 
 ModelOpt = Annotated[
     str,
     typer.Option("--model", "-m", help="LLM: ollama/<model> (default, local), openai/<model>, lmstudio/<model>, "
-                 "openrouter/<model>, groq/<model>.", envvar="DIFFREEL_MODEL"),
+                 "openrouter/<model>, groq/<model>.", envvar="PULLREEL_MODEL"),
 ]  # fmt: skip
 BaseUrlOpt = Annotated[str | None, typer.Option("--base-url", help="Override the LLM endpoint URL.")]
 ApiKeyOpt = Annotated[
-    str | None, typer.Option("--api-key", help="API key (else DIFFREEL_API_KEY / OPENAI_API_KEY...).", show_default=False)
+    str | None, typer.Option("--api-key", help="API key (else PULLREEL_API_KEY / OPENAI_API_KEY...).", show_default=False)
 ]
 HeadedOpt = Annotated[bool, typer.Option(help="Show the browser.")]
 
 
 def _print_version(value: bool) -> None:
     if value:
-        console.print(f"diffreel {__version__}")
+        console.print(f"pullreel {__version__}")
         raise typer.Exit()
 
 
@@ -67,7 +67,7 @@ def _main(
         typer.Option("--version", help="Show the version and exit.", callback=_print_version, is_eager=True),
     ] = False,
 ) -> None:
-    """DiffReel - turn a git diff into a cinematic UI demo for your Pull Request."""
+    """PullReel - turn a git diff into a cinematic UI demo for your Pull Request."""
 
 
 # Helpers -----------------------------------------------------------------------------------------------------
@@ -78,7 +78,7 @@ def _friendly_errors() -> Iterator[None]:
     except KNOWN_ERRORS as exc:
         title = {GitError: "git", LLMError: "LLM", PlanError: "storyboard", StepError: "browser",
                  ExportError: "ffmpeg"}.get(type(exc), "error")  # fmt: skip
-        console.print(Panel(escape(str(exc)), title=f"DiffReel failed ({title})", border_style="red"))
+        console.print(Panel(escape(str(exc)), title=f"PullReel failed ({title})", border_style="red"))
         raise typer.Exit(1) from exc
 
 
@@ -209,12 +209,12 @@ def _summary(info: dict[str, str], t0: float, extra: dict[str, str] | None = Non
 
 @contextmanager
 def _workdir(keep: bool) -> Iterator[Path]:
-    work = Path(tempfile.mkdtemp(prefix="diffreel-"))
+    work = Path(tempfile.mkdtemp(prefix="pullreel-"))
     try:
         yield work
     finally:
         if keep:
-            console.print(f"[dim]raw frames + recording.json kept in {work}  (re-render: diffreel render {work})[/]")
+            console.print(f"[dim]raw frames + recording.json kept in {work}  (re-render: pullreel render {work})[/]")
         else:
             shutil.rmtree(work, ignore_errors=True)
 
@@ -233,13 +233,13 @@ def record(
     api_key: ApiKeyOpt = None,
     storyboard: Annotated[
         Path | None,
-        typer.Option("--storyboard", "-s", help="Use this storyboard JSON (from `diffreel plan`) instead of the LLM.",
+        typer.Option("--storyboard", "-s", help="Use this storyboard JSON (from `pullreel plan`) instead of the LLM.",
                      exists=True, dir_okay=False),
     ] = None,  # fmt: skip
     gif: Annotated[bool | None, typer.Option("--gif/--no-gif", help="Force GIF on/off (default: from --out).")] = None,
     seed: Annotated[int, typer.Option(help="Random seed for the human mouse paths.")] = 7,
     headed: HeadedOpt = False,
-    keep_frames: Annotated[bool, typer.Option(help="Keep raw frames + recording.json for `diffreel render`.")] = False,
+    keep_frames: Annotated[bool, typer.Option(help="Keep raw frames + recording.json for `pullreel render`.")] = False,
 ) -> None:
     """Diff -> storyboard (LLM) -> human-paced recording -> cinematic MP4 + GIF for your PR."""
     t0 = time.perf_counter()
@@ -260,7 +260,7 @@ def record(
         with _workdir(keep_frames) as work:
             rec = _record(start, sb, work, headed=headed, seed=seed)
             info = render(rec, mp4, gif=gif_path, theme=StudioTheme())
-        _summary(info, t0, {"Storyboard": f"{sb_path}  (edit it, then: diffreel record -s {sb_path.name} ...)"})
+        _summary(info, t0, {"Storyboard": f"{sb_path}  (edit it, then: pullreel record -s {sb_path.name} ...)"})
 
 
 @app.command()
@@ -282,7 +282,7 @@ def plan(
         res = _plan(url, diff, model, base_url, api_key, headed)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(res.storyboard.model_dump_json(indent=2), encoding="utf-8")
-    console.print(f"[green]Storyboard written to {out}[/]  ->  [bold]diffreel record --url {url} -s {out}[/]")
+    console.print(f"[green]Storyboard written to {out}[/]  ->  [bold]pullreel record --url {url} -s {out}[/]")
 
 
 @app.command("render")
@@ -305,7 +305,7 @@ def render_cmd(
 @app.command()
 def diff(repo: RepoOpt = Path("."), base: BaseOpt = "main",
          prompt: Annotated[bool, typer.Option(help="Print the exact text sent to the LLM.")] = False) -> None:  # fmt: skip
-    """Show what DiffReel understood from your branch (no browser, no LLM)."""
+    """Show what PullReel understood from your branch (no browser, no LLM)."""
     with _friendly_errors():
         summary = _load_diff(repo, base)
     if prompt:
@@ -345,7 +345,7 @@ def demo_storyboard() -> Storyboard:
 
 @app.command()
 def demo(
-    out: Annotated[Path, typer.Option("--out", "-o", help="Output directory.")] = Path("diffreel-out"),
+    out: Annotated[Path, typer.Option("--out", "-o", help="Output directory.")] = Path("pullreel-out"),
     headed: HeadedOpt = False,
     gif: Annotated[bool, typer.Option("--gif/--no-gif", help="Also export a GitHub-ready GIF.")] = True,
     seed: Annotated[int, typer.Option(help="Random seed for the human mouse paths.")] = 7,
@@ -353,12 +353,12 @@ def demo(
 ) -> None:
     """Record the bundled demo page and render a cinematic MP4 + GIF. No LLM, no config."""
     t0 = time.perf_counter()
-    console.print(Panel.fit("[bold]DiffReel demo[/]  built-in page -> human run -> spring camera -> studio render",
+    console.print(Panel.fit("[bold]PullReel demo[/]  built-in page -> human run -> spring camera -> studio render",
                             border_style="magenta"))  # fmt: skip
     out.mkdir(parents=True, exist_ok=True)
     with _friendly_errors():
         find_ffmpeg()
-        page = resources.files("diffreel.assets").joinpath("demo.html")
+        page = resources.files("pullreel.assets").joinpath("demo.html")
         with resources.as_file(page) as html, _workdir(keep_frames) as work:
             rec = _record(html.resolve().as_uri(), demo_storyboard(), work, headed=headed, seed=seed)
             info = render(rec, out / "demo.mp4", gif=(out / "demo.gif") if gif else None, theme=StudioTheme())

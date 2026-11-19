@@ -29,12 +29,12 @@ from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import async_playwright
 from pydantic import BaseModel, Field, ValidationError
 
-from diffreel.human_runner import SCALE, VIEWPORT, launch_chromium, resolve_locator
-from diffreel.models import ActionStep, Camera, DiffSummary, Locator, Storyboard
+from pullreel.human_runner import SCALE, VIEWPORT, launch_chromium, resolve_locator
+from pullreel.models import ActionStep, Camera, DiffSummary, Locator, Storyboard
 
 ProgressFn = Callable[[str], None]
 
-SYSTEM_PROMPT = """You are the Autonomous Demo Director inside DiffReel.
+SYSTEM_PROMPT = """You are the Autonomous Demo Director inside PullReel.
 Your job is to read a Git diff and the live Accessibility Snapshot of a web page, then design a crisp, high-impact 5-to-12-second UI demonstration storyboard in strict JSON format.
 
 ### INPUTS PROVIDED TO YOU
@@ -179,8 +179,8 @@ def parse_model_spec(spec: str, *, base_url: str | None = None, api_key: str | N
         host = os.environ["OLLAMA_HOST"]
         host = host if host.startswith("http") else f"http://{host}"
         default_url = host.rstrip("/") + "/v1"
-    url = base_url or os.environ.get("DIFFREEL_BASE_URL") or default_url
-    key = api_key or os.environ.get("DIFFREEL_API_KEY")
+    url = base_url or os.environ.get("PULLREEL_BASE_URL") or default_url
+    key = api_key or os.environ.get("PULLREEL_API_KEY")
     for env in key_envs:
         key = key or os.environ.get(env)
     return LLMConfig(model=model, base_url=url.rstrip("/"), api_key=key, ollama_native=provider == "ollama")

@@ -1,4 +1,4 @@
-"""Unit and integration tests for diffreel.diff_analyzer."""
+"""Unit and integration tests for pullreel.diff_analyzer."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from diffreel.diff_analyzer import (
+from pullreel.diff_analyzer import (
     GitError,
     analyze_diff,
     build_excerpt,
@@ -20,7 +20,7 @@ from diffreel.diff_analyzer import (
     parse_name_status,
     parse_numstat,
 )
-from diffreel.models import ChangedFile
+from pullreel.models import ChangedFile
 
 
 @pytest.mark.parametrize(
@@ -82,7 +82,7 @@ def test_is_ignored_and_is_ui() -> None:
     assert is_ui_file("components/helpers.ts")
     assert is_ui_file("src/routes/settings/+page.ts")
     assert not is_ui_file("src/server/db.ts")
-    assert not is_ui_file("src/diffreel/diff_analyzer.py")
+    assert not is_ui_file("src/pullreel/diff_analyzer.py")
 
 
 def test_extract_from_added_lines_jsx() -> None:
