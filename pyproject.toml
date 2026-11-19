@@ -1,0 +1,41 @@
+[project]
+name = "diffreel"
+version = "0.1.0"
+description = "Turn a git diff into a cinematic, ScreenStudio-style UI demo video for your Pull Request."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["demo", "video", "playwright", "pull-request", "gif", "screen-recording"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Environment :: Console",
+    "Topic :: Software Development :: Documentation",
+]
+dependencies = [
+    "typer>=0.12",
+    "rich>=13",
+    "playwright>=1.48",
+    "numpy>=2.0",
+    "opencv-python-headless>=4.10",
+    "pillow>=10",
+    "pydantic>=2.7",
+    "httpx>=0.27",
+    "imageio-ffmpeg>=0.5",
+]
+
+[project.scripts]
+diffreel = "diffreel.cli:app"
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/diffreel"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.hatch.build.targets.sdist]
+only-include = ["src", "tests", "scripts", "README.md", "LICENSE", "pyproject.toml"]

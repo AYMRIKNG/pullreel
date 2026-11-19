@@ -1,0 +1,1 @@
+"""Bundled assets (demo page)."""

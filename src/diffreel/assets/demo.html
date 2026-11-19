@@ -1,0 +1,1028 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=1280, initial-scale=1.0">
+  <title>Acme · Inbox</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0B0B0E;
+      --panel: #111114;
+      --panel-elev: #16161A;
+      --border: #27272A;
+      --border-hover: #3F3F46;
+      --text: #FAFAFA;
+      --text-muted: #A1A1AA;
+      --text-subtle: #71717A;
+      --accent: #8B5CF6;
+      --accent-hover: #9B70FA;
+      --accent-active: #7C3AED;
+      --radius: 8px;
+      --ease: cubic-bezier(0.22, 1, 0.36, 1);
+      --icon-check: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round'><polyline points='20 6 9 17 4 12'/></svg>");
+    }
+
+    *, *::before, *::after {
+      box-sizing: border-box;
+    }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, "Segoe UI", Inter, Roboto, sans-serif;
+      font-size: 14px;
+      line-height: 1.45;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    button, input {
+      font: inherit;
+      color: inherit;
+    }
+
+    .app {
+      display: flex;
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      background: var(--bg);
+    }
+
+    /* Sidebar */
+    .sidebar {
+      width: 232px;
+      flex-shrink: 0;
+      background: var(--panel);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      padding: 14px 12px;
+      user-select: none;
+    }
+
+    .workspace {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 6px 8px;
+      margin-bottom: 14px;
+      border-radius: var(--radius);
+      cursor: pointer;
+      transition: background 180ms ease;
+    }
+
+    .workspace:hover {
+      background: #1A1A20;
+    }
+
+    .workspace:active {
+      background: #202028;
+    }
+
+    .logo-mark {
+      width: 24px;
+      height: 24px;
+      border-radius: 6px;
+      background: linear-gradient(145deg, #9D74F7 0%, #7C3AED 100%);
+      box-shadow: 0 2px 8px rgba(139, 92, 246, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.25);
+      display: grid;
+      place-items: center;
+      flex-shrink: 0;
+    }
+
+    .workspace-name {
+      font-size: 14.5px;
+      font-weight: 600;
+      letter-spacing: -0.015em;
+      color: var(--text);
+      flex: 1;
+    }
+
+    .workspace-chevron {
+      color: var(--text-subtle);
+      flex-shrink: 0;
+    }
+
+    .nav-list {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .nav-item {
+      appearance: none;
+      border: 1px solid transparent;
+      background: transparent;
+      width: 100%;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 7px 10px;
+      border-radius: var(--radius);
+      font-size: 14px;
+      font-weight: 450;
+      color: var(--text-muted);
+      cursor: pointer;
+      text-align: left;
+      transition: background 160ms ease, color 160ms ease, border-color 160ms ease, transform 120ms ease;
+    }
+
+    .nav-item:hover {
+      background: #1A1A21;
+      color: var(--text);
+    }
+
+    .nav-item:active {
+      transform: scale(0.985);
+      background: #202028;
+    }
+
+    .nav-item:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: -1px;
+    }
+
+    .nav-item.is-active {
+      background: #1B1B22;
+      border-color: rgba(255, 255, 255, 0.06);
+      color: var(--text);
+      font-weight: 500;
+    }
+
+    .nav-item.is-active:hover {
+      background: #21212A;
+      border-color: rgba(255, 255, 255, 0.1);
+    }
+
+    .nav-icon {
+      width: 16px;
+      height: 16px;
+      flex-shrink: 0;
+      color: var(--text-subtle);
+      transition: color 160ms ease;
+    }
+
+    .nav-item:hover .nav-icon {
+      color: var(--text-muted);
+    }
+
+    .nav-item.is-active .nav-icon {
+      color: var(--accent);
+    }
+
+    .nav-label {
+      flex: 1;
+    }
+
+    .nav-badge {
+      min-width: 20px;
+      height: 19px;
+      padding: 0 6px;
+      border-radius: 999px;
+      background: rgba(139, 92, 246, 0.18);
+      border: 1px solid rgba(139, 92, 246, 0.32);
+      color: #C4B5FD;
+      font-size: 11.5px;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .sidebar-section {
+      margin-top: 22px;
+      padding-top: 16px;
+      border-top: 1px solid rgba(39, 39, 42, 0.75);
+    }
+
+    .section-title {
+      padding: 0 10px 8px;
+      font-size: 11.5px;
+      font-weight: 550;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--text-subtle);
+    }
+
+    .team-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      margin: 0 4px;
+      flex-shrink: 0;
+    }
+
+    .team-dot.violet {
+      background: #8B5CF6;
+      box-shadow: 0 0 8px rgba(139, 92, 246, 0.55);
+    }
+
+    .team-dot.emerald {
+      background: #10B981;
+      box-shadow: 0 0 8px rgba(16, 185, 129, 0.45);
+    }
+
+    /* Main Area */
+    .main {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      position: relative;
+      background:
+        radial-gradient(680px 260px at 36% 0%, rgba(139, 92, 246, 0.075), transparent 72%),
+        var(--bg);
+    }
+
+    .topbar {
+      height: 54px;
+      flex-shrink: 0;
+      padding: 0 28px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: rgba(11, 11, 14, 0.72);
+    }
+
+    .breadcrumb {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 14px;
+      letter-spacing: -0.005em;
+    }
+
+    .breadcrumb-muted {
+      color: var(--text-muted);
+    }
+
+    .breadcrumb-sep {
+      color: var(--text-subtle);
+    }
+
+    .breadcrumb-current {
+      color: var(--text);
+      font-weight: 500;
+    }
+
+    .avatar-stack {
+      display: flex;
+      align-items: center;
+    }
+
+    .avatar {
+      width: 26px;
+      height: 26px;
+      border-radius: 50%;
+      border: 2px solid var(--bg);
+      display: grid;
+      place-items: center;
+      font-size: 10.5px;
+      font-weight: 600;
+      letter-spacing: 0.01em;
+      color: #FAFAFA;
+      margin-left: -7px;
+      transition: transform 160ms var(--ease);
+      cursor: default;
+    }
+
+    .avatar:first-child {
+      margin-left: 0;
+    }
+
+    .avatar:hover {
+      transform: translateY(-2px);
+      z-index: 2;
+    }
+
+    .avatar.a1 { background: linear-gradient(135deg, #7C3AED, #4F46E5); }
+    .avatar.a2 { background: linear-gradient(135deg, #0EA5E9, #2563EB); }
+    .avatar.a3 { background: linear-gradient(135deg, #10B981, #059669); }
+
+    .content {
+      flex: 1;
+      padding: 40px 56px;
+      overflow: hidden;
+    }
+
+    /* Main Card */
+    .card {
+      width: 100%;
+      max-width: 760px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow:
+        0 24px 60px rgba(0, 0, 0, 0.48),
+        0 1px 0 rgba(255, 255, 255, 0.03) inset;
+      overflow: hidden;
+    }
+
+    .card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 18px 22px 16px;
+      border-bottom: 1px solid rgba(39, 39, 42, 0.8);
+    }
+
+    .card-title-group {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .card-title {
+      margin: 0;
+      font-size: 16px;
+      font-weight: 600;
+      letter-spacing: -0.015em;
+      color: var(--text);
+    }
+
+    .open-count {
+      min-width: 23px;
+      height: 22px;
+      padding: 0 7px;
+      border-radius: 999px;
+      background: rgba(139, 92, 246, 0.16);
+      border: 1px solid rgba(139, 92, 246, 0.36);
+      color: #C4B5FD;
+      font-size: 12px;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      transform-origin: center;
+    }
+
+    .open-count.is-pop {
+      animation: countPop 260ms var(--ease);
+    }
+
+    @keyframes countPop {
+      0% { transform: scale(1); background: rgba(139, 92, 246, 0.16); }
+      45% { transform: scale(1.24); background: rgba(139, 92, 246, 0.36); color: #FFFFFF; }
+      100% { transform: scale(1); background: rgba(139, 92, 246, 0.16); }
+    }
+
+    .card-meta {
+      font-size: 12.5px;
+      color: var(--text-subtle);
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* Composer */
+    .composer {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 16px 22px;
+      border-bottom: 1px solid rgba(39, 39, 42, 0.65);
+      background: rgba(22, 22, 26, 0.38);
+    }
+
+    .task-input {
+      flex: 1;
+      height: 38px;
+      padding: 0 13px;
+      background: var(--panel-elev);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      font-size: 14px;
+      color: var(--text);
+      outline: none;
+      transition: background 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
+    }
+
+    .task-input::placeholder {
+      color: var(--text-subtle);
+    }
+
+    .task-input:hover {
+      background: #1B1B21;
+      border-color: var(--border-hover);
+    }
+
+    .task-input:focus {
+      background: #18181F;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.22);
+    }
+
+    .add-btn {
+      height: 38px;
+      padding: 0 15px;
+      border-radius: var(--radius);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      background: var(--accent);
+      color: #FFFFFF;
+      font-size: 14px;
+      font-weight: 550;
+      letter-spacing: -0.005em;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      white-space: nowrap;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.16);
+      transition: background 160ms ease, border-color 160ms ease, box-shadow 180ms ease, transform 120ms ease;
+    }
+
+    .add-btn:hover {
+      background: var(--accent-hover);
+      border-color: rgba(255, 255, 255, 0.24);
+      box-shadow: 0 4px 16px rgba(139, 92, 246, 0.36), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+    }
+
+    .add-btn:active {
+      background: var(--accent-active);
+      transform: translateY(1px) scale(0.98);
+      box-shadow: 0 1px 4px rgba(139, 92, 246, 0.25);
+    }
+
+    .add-btn:focus-visible {
+      outline: 2px solid #C4B5FD;
+      outline-offset: 2px;
+    }
+
+    /* Filter Toolbar */
+    .toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 22px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .segmented {
+      display: inline-flex;
+      align-items: center;
+      gap: 2px;
+      padding: 3px;
+      background: #0D0D11;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+
+    .filter-btn {
+      appearance: none;
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--text-muted);
+      padding: 5px 12px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 160ms ease, color 160ms ease, border-color 160ms ease, box-shadow 160ms ease, transform 120ms ease;
+    }
+
+    .filter-btn:hover {
+      background: #1B1B22;
+      color: var(--text);
+    }
+
+    .filter-btn:active {
+      transform: scale(0.96);
+    }
+
+    .filter-btn:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: -1px;
+    }
+
+    .filter-btn[aria-pressed="true"] {
+      background: #23232B;
+      border-color: #363640;
+      color: var(--text);
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.07);
+    }
+
+    .filter-btn[aria-pressed="true"]:hover {
+      background: #2A2A34;
+      border-color: #454552;
+    }
+
+    .toolbar-hint {
+      font-size: 12px;
+      color: var(--text-subtle);
+    }
+
+    /* Task List */
+    .task-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+    }
+
+    .task-item {
+      display: grid;
+      grid-template-rows: 1fr;
+      opacity: 1;
+      transition: grid-template-rows 220ms var(--ease), opacity 190ms ease;
+    }
+
+    .task-item.is-entering,
+    .task-item.is-collapsed {
+      grid-template-rows: 0fr;
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .task-clip {
+      overflow: hidden;
+      min-height: 0;
+    }
+
+    .task-row {
+      display: flex;
+      align-items: center;
+      gap: 13px;
+      padding: 13px 22px;
+      border-bottom: 1px solid rgba(39, 39, 42, 0.7);
+      background: transparent;
+      transform: translateY(0);
+      transition: background 170ms ease, opacity 200ms ease, transform 220ms var(--ease);
+    }
+
+    .task-item:last-child .task-row {
+      border-bottom-color: transparent;
+    }
+
+    .task-item.is-entering .task-row {
+      transform: translateY(-6px);
+    }
+
+    .task-row:hover {
+      background: #17171E;
+    }
+
+    .task-row:active {
+      background: #1C1C25;
+    }
+
+    .task-item.is-highlight .task-row {
+      animation: highlightFade 1.2s ease-out forwards;
+    }
+
+    @keyframes highlightFade {
+      0% { background: rgba(139, 92, 246, 0.24); }
+      35% { background: rgba(139, 92, 246, 0.14); }
+      100% { background: transparent; }
+    }
+
+    /* Custom Real Checkbox */
+    .task-check {
+      appearance: none;
+      -webkit-appearance: none;
+      margin: 0;
+      width: 18px;
+      height: 18px;
+      flex-shrink: 0;
+      border-radius: 5px;
+      border: 1.5px solid #4A4A55;
+      background: var(--panel-elev);
+      display: inline-grid;
+      place-content: center;
+      cursor: pointer;
+      transition: background 160ms ease, border-color 160ms ease, box-shadow 160ms ease, transform 120ms ease;
+    }
+
+    .task-check::before {
+      content: "";
+      width: 11px;
+      height: 11px;
+      background-color: #FFFFFF;
+      -webkit-mask: var(--icon-check) no-repeat center / contain;
+      mask: var(--icon-check) no-repeat center / contain;
+      transform: scale(0);
+      transition: transform 170ms var(--ease);
+    }
+
+    .task-check:hover {
+      border-color: var(--accent);
+      background: #1E1E28;
+    }
+
+    .task-check:active {
+      transform: scale(0.88);
+    }
+
+    .task-check:checked {
+      background: var(--accent);
+      border-color: var(--accent);
+      box-shadow: 0 0 0 1px rgba(139, 92, 246, 0.3);
+    }
+
+    .task-check:checked:hover {
+      background: var(--accent-hover);
+      border-color: var(--accent-hover);
+    }
+
+    .task-check:checked::before {
+      transform: scale(1);
+    }
+
+    .task-check:focus-visible {
+      outline: 2px solid #A78BFA;
+      outline-offset: 2px;
+    }
+
+    .task-title-wrap {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      align-items: center;
+    }
+
+    .task-title {
+      font-size: 14.5px;
+      color: var(--text);
+      letter-spacing: -0.005em;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      background-image: linear-gradient(currentColor, currentColor);
+      background-repeat: no-repeat;
+      background-position: 0 53%;
+      background-size: 0% 1.5px;
+      transition: color 200ms ease, background-size 220ms var(--ease);
+    }
+
+    .task-item.is-done .task-row {
+      opacity: 0.62;
+    }
+
+    .task-item.is-done .task-title {
+      color: var(--text-muted);
+      text-decoration: line-through;
+      text-decoration-color: transparent;
+      background-size: 100% 1.5px;
+    }
+
+    /* Label Pills */
+    .pill {
+      padding: 2px 9px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 500;
+      line-height: 1.5;
+      border: 1px solid transparent;
+      flex-shrink: 0;
+      transition: opacity 180ms ease;
+    }
+
+    .pill-billing {
+      background: rgba(99, 102, 241, 0.14);
+      border-color: rgba(99, 102, 241, 0.3);
+      color: #A5B4FC;
+    }
+
+    .pill-qa {
+      background: rgba(245, 158, 11, 0.12);
+      border-color: rgba(245, 158, 11, 0.28);
+      color: #FCD34D;
+    }
+
+    .pill-docs {
+      background: rgba(16, 185, 129, 0.12);
+      border-color: rgba(16, 185, 129, 0.28);
+      color: #6EE7B7;
+    }
+
+    .pill-new {
+      background: rgba(139, 92, 246, 0.18);
+      border-color: rgba(139, 92, 246, 0.38);
+      color: #C4B5FD;
+    }
+
+    .task-time {
+      font-size: 12.5px;
+      color: var(--text-subtle);
+      font-variant-numeric: tabular-nums;
+      min-width: 28px;
+      text-align: right;
+      flex-shrink: 0;
+    }
+
+    /* Toast */
+    .toast {
+      position: fixed;
+      right: 24px;
+      bottom: 24px;
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      padding: 10px 14px;
+      background: var(--panel-elev);
+      border: 1px solid #32323A;
+      border-radius: var(--radius);
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(139, 92, 246, 0.16);
+      font-size: 13.5px;
+      font-weight: 500;
+      color: var(--text);
+      pointer-events: none;
+      opacity: 0;
+      transform: translateY(14px) scale(0.96);
+      transition: opacity 200ms var(--ease), transform 220ms var(--ease);
+    }
+
+    .toast.is-visible {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+
+    .toast-dot {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: rgba(139, 92, 246, 0.2);
+      border: 1px solid rgba(139, 92, 246, 0.45);
+      display: grid;
+      place-items: center;
+      color: #C4B5FD;
+      flex-shrink: 0;
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar" aria-label="Sidebar">
+      <div class="workspace">
+        <div class="logo-mark" aria-hidden="true">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+            <path d="M8 2L14 13H2L8 2Z" fill="#FAFAFA" fill-opacity="0.95"/>
+            <path d="M8 6.2L11 11.5H5L8 6.2Z" fill="#7C3AED"/>
+          </svg>
+        </div>
+        <span class="workspace-name">Acme</span>
+        <svg class="workspace-chevron" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <path d="M4.5 6.5L8 10L11.5 6.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+
+      <nav class="nav-list" aria-label="Primary">
+        <button type="button" class="nav-item is-active" aria-current="page">
+          <svg class="nav-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path d="M2.5 9.5L4.3 3.8C4.5 3.3 4.9 3 5.5 3H10.5C11.1 3 11.5 3.3 11.7 3.8L13.5 9.5M2.5 9.5V12C2.5 12.6 2.9 13 3.5 13H12.5C13.1 13 13.5 12.6 13.5 12V9.5M2.5 9.5H5.5L6.5 11H9.5L10.5 9.5H13.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span class="nav-label">Inbox</span>
+          <span class="nav-badge" id="inbox-count">2</span>
+        </button>
+
+        <button type="button" class="nav-item">
+          <svg class="nav-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <circle cx="8" cy="8" r="5.5" stroke="currentColor" stroke-width="1.4"/>
+            <circle cx="8" cy="8" r="2" fill="currentColor"/>
+          </svg>
+          <span class="nav-label">My issues</span>
+        </button>
+
+        <button type="button" class="nav-item">
+          <svg class="nav-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1.2" stroke="currentColor" stroke-width="1.4"/>
+            <rect x="9" y="2.5" width="4.5" height="4.5" rx="1.2" stroke="currentColor" stroke-width="1.4"/>
+            <rect x="2.5" y="9" width="4.5" height="4.5" rx="1.2" stroke="currentColor" stroke-width="1.4"/>
+            <rect x="9" y="9" width="4.5" height="4.5" rx="1.2" stroke="currentColor" stroke-width="1.4"/>
+          </svg>
+          <span class="nav-label">Projects</span>
+        </button>
+
+        <button type="button" class="nav-item">
+          <svg class="nav-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path d="M8 2.5L13 5.3V10.7L8 13.5L3 10.7V5.3L8 2.5Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
+            <path d="M8 8V13.5M8 8L13 5.3M8 8L3 5.3" stroke="currentColor" stroke-width="1.3"/>
+          </svg>
+          <span class="nav-label">Releases</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-section">
+        <div class="section-title">Teams</div>
+        <div class="nav-list">
+          <button type="button" class="nav-item">
+            <span class="team-dot violet" aria-hidden="true"></span>
+            <span class="nav-label">Core Platform</span>
+          </button>
+          <button type="button" class="nav-item">
+            <span class="team-dot emerald" aria-hidden="true"></span>
+            <span class="nav-label">Design Systems</span>
+          </button>
+        </div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="breadcrumb">
+          <span class="breadcrumb-muted">Sprint 24</span>
+          <span class="breadcrumb-sep" aria-hidden="true">·</span>
+          <span class="breadcrumb-current">Inbox</span>
+        </div>
+        <div class="avatar-stack" aria-label="Team members">
+          <span class="avatar a1" title="Alex Lin">AL</span>
+          <span class="avatar a2" title="Maya Kim">MK</span>
+          <span class="avatar a3" title="Sam Rivera">SR</span>
+        </div>
+      </header>
+
+      <div class="content">
+        <section class="card" aria-labelledby="tasks-heading">
+          <div class="card-header">
+            <div class="card-title-group">
+              <h1 class="card-title" id="tasks-heading">Tasks</h1>
+              <span class="open-count" id="open-count">2</span>
+            </div>
+            <span class="card-meta" id="total-meta">3 total</span>
+          </div>
+
+          <form class="composer" id="composer-form">
+            <input
+              type="text"
+              class="task-input"
+              id="task-input"
+              placeholder="Add a task…"
+              aria-label="New task"
+              autocomplete="off"
+            >
+            <button type="submit" class="add-btn">Add task</button>
+          </form>
+
+          <div class="toolbar">
+            <div class="segmented" role="group" aria-label="Filter tasks">
+              <button type="button" class="filter-btn" data-filter="all" aria-pressed="true">All</button>
+              <button type="button" class="filter-btn" data-filter="open" aria-pressed="false">Open</button>
+              <button type="button" class="filter-btn" data-filter="done" aria-pressed="false">Done</button>
+            </div>
+            <span class="toolbar-hint">Enter to add</span>
+          </div>
+
+          <ul class="task-list" id="task-list" aria-label="Task list"></ul>
+        </section>
+      </div>
+
+      <div class="toast" id="toast" role="status" aria-live="polite">
+        <span class="toast-dot" aria-hidden="true">
+          <svg width="10" height="10" viewBox="0 0 12 12" fill="none">
+            <path d="M2.5 6.3L4.9 8.7L9.5 3.7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </span>
+        <span>Task added</span>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    (() => {
+      const initialTasks = [
+        { title: "Migrate billing to Stripe v3", done: false, label: "Billing", pill: "pill-billing", time: "2h" },
+        { title: "Fix flaky login test", done: true, label: "QA", pill: "pill-qa", time: "1d" },
+        { title: "Write Q4 changelog", done: false, label: "Docs", pill: "pill-docs", time: "3d" }
+      ];
+
+      const listEl = document.getElementById("task-list");
+      const formEl = document.getElementById("composer-form");
+      const inputEl = document.getElementById("task-input");
+      const openCountEl = document.getElementById("open-count");
+      const inboxCountEl = document.getElementById("inbox-count");
+      const totalMetaEl = document.getElementById("total-meta");
+      const filterBtns = Array.from(document.querySelectorAll(".filter-btn"));
+      const toastEl = document.getElementById("toast");
+
+      let currentFilter = "all";
+      let toastTimer = null;
+
+      function createTaskItem(task, animateIn = false) {
+        const li = document.createElement("li");
+        li.className = "task-item" + (task.done ? " is-done" : "");
+        li.dataset.done = String(task.done);
+        if (animateIn) li.classList.add("is-entering", "is-highlight");
+
+        const clip = document.createElement("div");
+        clip.className = "task-clip";
+
+        const row = document.createElement("div");
+        row.className = "task-row";
+
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.className = "task-check";
+        checkbox.checked = task.done;
+        checkbox.setAttribute("aria-label", `Complete ${task.title}`);
+
+        const titleWrap = document.createElement("div");
+        titleWrap.className = "task-title-wrap";
+        const titleEl = document.createElement("span");
+        titleEl.className = "task-title";
+        titleEl.textContent = task.title;
+        titleWrap.appendChild(titleEl);
+
+        const pill = document.createElement("span");
+        pill.className = `pill ${task.pill}`;
+        pill.textContent = task.label;
+
+        const time = document.createElement("span");
+        time.className = "task-time";
+        time.textContent = task.time;
+
+        checkbox.addEventListener("change", () => {
+          const isDone = checkbox.checked;
+          li.dataset.done = String(isDone);
+          li.classList.toggle("is-done", isDone);
+          updateCounts(true);
+          applyFilter();
+        });
+
+        row.append(checkbox, titleWrap, pill, time);
+        clip.appendChild(row);
+        li.appendChild(clip);
+        return li;
+      }
+
+      function updateCounts(pop = false) {
+        const items = Array.from(listEl.children);
+        const openCount = items.filter((item) => item.dataset.done !== "true").length;
+        openCountEl.textContent = String(openCount);
+        inboxCountEl.textContent = String(openCount);
+        totalMetaEl.textContent = `${items.length} total`;
+        if (pop) {
+          openCountEl.classList.remove("is-pop");
+          void openCountEl.offsetWidth;
+          openCountEl.classList.add("is-pop");
+        }
+      }
+
+      function setFilter(nextFilter) {
+        currentFilter = nextFilter;
+        filterBtns.forEach((btn) => {
+          btn.setAttribute("aria-pressed", String(btn.dataset.filter === currentFilter));
+        });
+        applyFilter();
+      }
+
+      function applyFilter() {
+        Array.from(listEl.children).forEach((item) => {
+          const isDone = item.dataset.done === "true";
+          const visible =
+            currentFilter === "all" ||
+            (currentFilter === "open" && !isDone) ||
+            (currentFilter === "done" && isDone);
+          item.classList.toggle("is-collapsed", !visible);
+          item.setAttribute("aria-hidden", String(!visible));
+          item.inert = !visible;
+        });
+      }
+
+      function showToast() {
+        clearTimeout(toastTimer);
+        toastEl.classList.remove("is-visible");
+        void toastEl.offsetWidth;
+        toastEl.classList.add("is-visible");
+        toastTimer = setTimeout(() => toastEl.classList.remove("is-visible"), 1600);
+      }
+
+      formEl.addEventListener("submit", (event) => {
+        event.preventDefault();
+        const title = inputEl.value.trim();
+        if (!title) {
+          inputEl.focus();
+          return;
+        }
+        if (currentFilter === "done") setFilter("all");
+
+        const li = createTaskItem(
+          { title, done: false, label: "New", pill: "pill-new", time: "now" },
+          true
+        );
+        listEl.prepend(li);
+        void li.offsetHeight;
+        requestAnimationFrame(() => li.classList.remove("is-entering"));
+        li.addEventListener("animationend", () => li.classList.remove("is-highlight"), { once: true });
+
+        inputEl.value = "";
+        inputEl.focus();
+        updateCounts(true);
+        showToast();
+      });
+
+      filterBtns.forEach((btn) => {
+        btn.addEventListener("click", () => setFilter(btn.dataset.filter));
+      });
+
+      initialTasks.forEach((task) => listEl.appendChild(createTaskItem(task)));
+      updateCounts(false);
+    })();
+  </script>
+</body>
+</html>
