@@ -14,6 +14,13 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 LocatorStrategy = Literal["role", "label", "placeholder", "text", "testid", "css"]
 CameraMode = Literal["wide", "focus", "pan"]
 ActionType = Literal["wait", "click", "fill", "press", "hover", "scroll", "show"]
+CursorType = Literal["arrow", "pointer", "text"]
+AspectRatio = Literal["16:9", "1:1", "9:16", "4:5"]
+ResolutionPreset = Literal["native", "1080p", "1440p", "4k"]
+QualityPreset = Literal["draft", "standard", "ultra"]
+WindowChrome = Literal["none", "macos", "windows"]
+BackgroundStyle = Literal["studio", "solid", "gradient", "wallpaper"]
+ExportFormat = Literal["mp4", "webm", "gif", "webp"]
 
 Box = tuple[float, float, float, float]  # x, y, width, height in CSS pixels
 
@@ -55,6 +62,7 @@ class ActionStep(BaseModel):
     input_value: str | None = None
     camera: Camera = Field(default_factory=Camera)
     dwell_after_ms: int = Field(default=450, ge=0, le=10_000)
+    caption: str | None = None
     # "show" = camera + cursor point at a result area (table, chart, stat) without clicking; the camera frames
     # the area's container, so a heading or a text inside it is enough as locator.
 
@@ -76,6 +84,8 @@ class Storyboard(BaseModel):
     feature_summary: str
     start_path: str = "/"
     steps: list[ActionStep] = Field(min_length=1)
+    journey: bool = False  # True for multi-page / multi-step end-to-end journeys (2-3 pages allowed)
+    mutates: bool = False  # True when the scenario creates or modifies app state
 
 
 class TelemetryFrame(BaseModel):
@@ -86,12 +96,28 @@ class TelemetryFrame(BaseModel):
     target_zoom: float
     focus_box: Box | None
     camera_mode: CameraMode
+    cursor_type: CursorType = "arrow"
 
 
 class ClickEvent(BaseModel):
     t: float
     x: float  # CSS px
     y: float
+
+
+class KeyEvent(BaseModel):
+    t: float
+    key: str
+    is_shortcut: bool = False
+
+
+class CaptionEvent(BaseModel):
+    t_start: float
+    t_end: float
+    text: str
+    step_index: int = 0
+    action: ActionType = "wait"
+    focus_box: Box | None = None
 
 
 class SourceFrame(BaseModel):
@@ -105,6 +131,10 @@ class Recording(BaseModel):
     frames: list[SourceFrame]
     telemetry: list[TelemetryFrame]
     clicks: list[ClickEvent] = Field(default_factory=list)
+    keys: list[KeyEvent] = Field(default_factory=list)
+    captions: list[CaptionEvent] = Field(default_factory=list)
+    url: str | None = None
+    feature_summary: str | None = None
     t_start: float
     t_end: float
 
@@ -218,23 +248,114 @@ class DiffSummary(BaseModel):
         return head[:max_chars]
 
 
+BACKGROUND_PRESETS: dict[str, tuple[BackgroundStyle, str, str | None, float]] = {
+    "studio": ("studio", "#09090B", None, 135.0),
+    "midnight": ("gradient", "#0B1026", "#2E1065", 135.0),
+    "aurora": ("gradient", "#0F172A", "#134E4A", 125.0),
+    "sunset": ("gradient", "#3B0764", "#9A3412", 135.0),
+    "ocean": ("gradient", "#0C192C", "#1D4ED8", 145.0),
+    "carbon": ("solid", "#111114", None, 135.0),
+    "light": ("gradient", "#F4F4F5", "#E4E4E7", 135.0),
+}
+
+
 class StudioTheme(BaseModel):
+    background_style: BackgroundStyle = "studio"
     background: str = "#09090B"
+    background_end: str | None = None
+    background_angle: float = 135.0
+    background_preset: str | None = None
+    wallpaper_path: str | None = None
+    wallpaper_blur: int = Field(default=36, ge=0, le=200)
+    accent: str = "#8B5CF6"
     border: str = "#27272A"
-    border_px: int = 1
-    radius_px: int = 16
-    padding_px: int = 56
-    shadow_blur: int = 48
-    shadow_alpha: float = 0.55
-    shadow_offset_y: int = 18
-    cursor_scale: float = 1.0
+    border_px: int = Field(default=1, ge=0, le=12)
+    radius_px: int = Field(default=16, ge=0, le=64)
+    padding_px: int = Field(default=56, ge=0, le=240)
+    shadow_blur: int = Field(default=48, ge=0, le=160)
+    shadow_alpha: float = Field(default=0.55, ge=0.0, le=1.0)
+    shadow_offset_y: int = Field(default=18, ge=-60, le=100)
+    window_chrome: WindowChrome = "macos"
+    show_url_bar: bool = False
+    browser_url: str | None = None
+    cursor_scale: float = Field(default=1.0, ge=0.5, le=2.5)
+    cursor_trail: bool = True
     ripple_color: tuple[int, int, int] = (255, 255, 255)
-    ripple_ms: int = 250
-    click_press_scale: float = 0.88
-    output_fps: int = 60
-    gif_fps: int = 30
-    gif_max_mb: float = 9.5  # GitHub accepts GIFs up to 10 MB in PR comments
-    crf: int = 18
+    ripple_ms: int = Field(default=280, ge=50, le=1500)
+    click_press_scale: float = Field(default=0.90, ge=0.6, le=1.0)
+    aspect: AspectRatio | None = None
+    resolution: ResolutionPreset = "native"
+    quality: QualityPreset = "standard"
+    output_fps: int = Field(default=60, ge=10, le=120)
+    gif_fps: int = Field(default=30, ge=5, le=50)
+    gif_max_mb: float = Field(default=9.5, gt=0.5, le=100.0)  # GitHub accepts GIFs up to 10 MB in PR comments
+    webp_fps: int = Field(default=24, ge=5, le=60)
+    webp_quality: int = Field(default=80, ge=10, le=100)
+    webm_crf: int = Field(default=28, ge=10, le=50)
+    crf: int = Field(default=18, ge=0, le=51)
+    x264_preset: str = "medium"
+    font_path: str | None = None
+    logo_path: str | None = None
+    brand_name: str | None = None
+    intro_enabled: bool = False
+    intro_title: str | None = None
+    intro_subtitle: str | None = None
+    intro_duration_s: float = Field(default=1.6, ge=0.0, le=6.0)
+    outro_enabled: bool = False
+    outro_title: str | None = None
+    outro_cta: str | None = None
+    outro_duration_s: float = Field(default=1.6, ge=0.0, le=6.0)
+    show_captions: bool = True
+    show_keystrokes: bool = True
+    formats: list[ExportFormat] = Field(default_factory=lambda: ["mp4", "gif"])
+    screenshots: bool = False
+
+    @model_validator(mode="after")
+    def _apply_preset(self) -> Self:
+        if self.background_preset:
+            key = self.background_preset.strip().lower()
+            if key not in BACKGROUND_PRESETS:
+                valid = ", ".join(sorted(BACKGROUND_PRESETS))
+                raise ValueError(f"unknown background_preset {self.background_preset!r}; expected one of: {valid}")
+            style, bg, bg_end, angle = BACKGROUND_PRESETS[key]
+            self.background_style = style
+            self.background = bg
+            self.background_end = bg_end
+            self.background_angle = angle
+        return self
+
+    def with_quality(self, quality: QualityPreset) -> tuple[StudioTheme, RenderSettings]:
+        """Return a copy tuned for ``draft``, ``standard``, or ``ultra`` plus matching ``RenderSettings``."""
+        th = self.model_copy(deep=True)
+        th.quality = quality
+        if quality == "draft":
+            th.output_fps = 30
+            th.gif_fps = 15
+            th.webp_fps = 15
+            th.webp_quality = 70
+            th.crf = 24
+            th.webm_crf = 34
+            th.x264_preset = "veryfast"
+            st = RenderSettings(motion_blur=0.0, motion_blur_samples=1, substeps=2)
+        elif quality == "ultra":
+            th.output_fps = 60
+            th.gif_fps = 30
+            th.webp_fps = 30
+            th.webp_quality = 88
+            th.crf = 15
+            th.webm_crf = 22
+            th.x264_preset = "slow"
+            st = RenderSettings(motion_blur=0.50, motion_blur_samples=3, substeps=6)
+        else:
+            th.output_fps = 60
+            th.gif_fps = 30
+            th.webp_fps = 24
+            th.webp_quality = 80
+            th.crf = 18
+            th.webm_crf = 28
+            th.x264_preset = "medium"
+            st = RenderSettings(motion_blur=0.35, motion_blur_samples=3, substeps=4)
+        return th, st
 
 
 class RenderSettings(BaseModel):
@@ -243,3 +364,8 @@ class RenderSettings(BaseModel):
     lookahead_s: float = 0.25  # camera anticipates the cursor by this much
     substeps: int = 4
     pan_deadzone: float = 0.30  # fraction of the crop the cursor may roam before a pan
+    motion_blur: float = Field(default=0.35, ge=0.0, le=1.0)
+    motion_blur_samples: int = Field(default=3, ge=1, le=5)
+    focus_padding_px: float = Field(default=48.0, ge=0.0, le=200.0)
+    focus_transition_s: float = Field(default=0.25, ge=0.0, le=1.0)
+    workers: int = Field(default=0, ge=0, le=16)  # 0 = auto parallel workers, 1 = serial

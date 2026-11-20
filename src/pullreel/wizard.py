@@ -6,7 +6,9 @@ they can be tested without a terminal.
 
 from __future__ import annotations
 
+import asyncio
 import os
+import re
 import socket
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -16,10 +18,21 @@ import httpx
 import questionary
 from questionary import Choice, Separator, Style
 
+from pullreel import net
 from pullreel.config import load_config, remember
 from pullreel.diff_analyzer import GitError, git
 from pullreel.models import DiffSummary
-from pullreel.storyboard_agent import PROVIDERS, LLMConfig, LLMError, ScoutPick, match_focus, parse_model_spec, provider_key
+from pullreel.storyboard_agent import (
+    PROVIDERS,
+    LLMConfig,
+    LLMError,
+    ScoutPick,
+    check_model,
+    list_models,
+    match_focus,
+    parse_model_spec,
+    provider_key,
+)
 
 STYLE = Style([
     ("qmark", "fg:#c678dd bold"), ("question", "bold"), ("pointer", "fg:#c678dd bold"),
@@ -84,24 +97,44 @@ class ScenarioChoice:
 
 
 def build_scenario_choices(recommended: list[ScoutPick], diff: DiffSummary) -> list[ScenarioChoice]:
-    """Scout picks first (★, all pre-checked), then every other candidate, then "write my own"."""
+    """Scout picks first (★, all pre-checked), then every other candidate (ranked by sales value), then "write my own"."""
+    from pullreel.journeys import score_candidate_sales
+
     out: list[ScenarioChoice] = []
     taken: set[str] = set()
     for p in recommended:
         star = "★" if p.recommended else " "
         where = f"  {p.route}" if p.route else ""
+        badges: list[str] = []
+        if p.sales_score is not None:
+            badges.append(f"score {int(round(p.sales_score))}")
+        if p.mutates:
+            badges.append("mutates")
+        badge_str = f"  [{' · '.join(badges)}]" if badges else ""
         why = f"  — {p.why}" if p.why else ""
-        out.append(ScenarioChoice(f"{star} {p.title}{where}{why}", p, checked=p.recommended))
+        out.append(ScenarioChoice(f"{star} {p.title}{where}{badge_str}{why}", p, checked=p.recommended))
         taken.add((p.route or p.title).lower())
+    remaining = []
     for f in diff.features:
         key = (f.route or f.title).lower()
         if key in taken:
             continue
         taken.add(key)
+        score = score_candidate_sales(candidate=f, title=f.title)
+        remaining.append((score, f))
+    remaining.sort(key=lambda x: -x[0])
+    for score, f in remaining:
         hint = f.commits[0] if f.commits else f"+{f.added} lines"
         where = f"  {f.route}" if f.route else ""
-        pick = ScoutPick(title=f.title, route=f.route, why=hint, labels=f.labels[:5], recommended=False)
-        out.append(ScenarioChoice(f"  {f.title}{where}  — {hint}", pick, checked=False))
+        pick = ScoutPick(
+            title=f.title,
+            route=f.route,
+            why=hint,
+            labels=f.labels[:5],
+            recommended=False,
+            sales_score=score,
+        )
+        out.append(ScenarioChoice(f"  {f.title}{where}  [score {int(round(score))}]  — {hint}", pick, checked=False))
     out.append(ScenarioChoice("✍  Write my own scenario…", None, checked=False))
     return out
 
@@ -109,6 +142,7 @@ def build_scenario_choices(recommended: list[ScoutPick], diff: DiffSummary) -> l
 def custom_pick(diff: DiffSummary, text: str) -> ScoutPick:
     pick = match_focus(diff, text)
     pick.why = f"user request: {text}"
+    pick.user_requested = True
     return pick
 
 
@@ -119,7 +153,15 @@ def ask_ai(say: Callable[[str], None]) -> LLMConfig:
     if isinstance(last, str) and last:
         if _ask(questionary.confirm(f"Use your last AI setup ({last})?", default=True, style=STYLE)):
             try:
-                return parse_model_spec(last)
+                cfg = parse_model_spec(last)
+                if cfg.provider not in ("ollama", "lmstudio"):
+                    available = list_models(cfg.provider, cfg.api_key)
+                    if available and cfg.model not in available:
+                        say(f"[yellow]{cfg.provider} has no model named {cfg.model!r}.[/]")
+                        model = _ask_model(cfg.provider, cfg.api_key, say, available)
+                        remember(f"{cfg.provider}/{model}")
+                        return parse_model_spec(f"{cfg.provider}/{model}")
+                return cfg
             except LLMError as exc:
                 say(f"[yellow]{exc}[/] - let's set it up again.")
     kind = _ask(questionary.select(
@@ -145,7 +187,7 @@ def _ollama_models() -> list[str] | None:
     host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
     host = host if host.startswith("http") else f"http://{host}"
     try:
-        tags = httpx.get(f"{host.rstrip('/')}/api/tags", timeout=2).json()
+        tags = net.get(f"{host.rstrip('/')}/api/tags", timeout=2).json()
     except (httpx.HTTPError, ValueError):
         return None
     return [m["name"] for m in tags.get("models", []) if "embed" not in m.get("name", "")]
@@ -185,10 +227,16 @@ def _ask_cloud(say: Callable[[str], None]) -> LLMConfig:
                                             validate=lambda v: len(v.strip()) > 8 or "that does not look like a key")))
         key = key.strip()
         where = None
-    model = str(_ask(questionary.text(
-        "Model name:", default=prov.default_model or "", style=STYLE,
-        instruction="" if prov.default_model else f"(as listed by {name}, e.g. the model id from its docs)",
-        validate=lambda v: bool(v.strip()) or "a model name is required"))).strip()  # fmt: skip
+    while True:
+        model = _ask_model(name, key, say)
+        say(f"[dim]Checking {name}/{model}...[/]")
+        problem = asyncio.run(check_model(parse_model_spec(f"{name}/{model}", api_key=key)))
+        if problem is None:
+            say(f"[green]{name}/{model} answers.[/]")
+            break
+        say(f"[yellow]{model} is not usable right now:[/] {problem}")
+        if not _ask(questionary.confirm("Pick another model?", default=True, style=STYLE)):
+            break
     spec = f"{name}/{model}"
     save_key = False
     if where is None:  # typed now: offer to remember it
@@ -199,6 +247,42 @@ def _ask_cloud(say: Callable[[str], None]) -> LLMConfig:
     if save_key:
         say(f"[dim]Key saved to {path} - delete it there (or run `pullreel models`) to forget it.[/]")
     return parse_model_spec(spec, api_key=key)
+
+
+def suggest_model(provider: str, models: list[str]) -> str | None:
+    """A sensible default: the provider's default if offered, else the newest fast general model ("flash", "mini"...)."""
+    default = PROVIDERS[provider].default_model
+    if default and default in models:
+        return default
+    # whole words only: "gemini" must not count as "mini"
+    fast = [m for m in models if re.search(r"(?<![a-z])(flash|mini|haiku|small|turbo|chat)(?![a-z])", m, re.I)
+            and not re.search(r"(?<![a-z])(lite|live|preview|exp|nano|tts|thinking)(?![a-z])", m, re.I)]  # fmt: skip
+
+    def version(m: str) -> tuple[float, ...]:
+        return tuple(float(x) for x in re.findall(r"\d+(?:\.\d+)?", m)[:2]) or (0.0,)
+
+    pool = fast or models
+    return max(pool, key=version) if pool else None
+
+
+def _ask_model(provider: str, key: str | None, say: Callable[[str], None], models: list[str] | None = None) -> str:
+    """Pick from the models this key can really use; free text only when the provider cannot list them."""
+    if models is None:
+        try:
+            models = list_models(provider, key)
+        except LLMError as exc:
+            say(f"[yellow]{exc}[/]")
+            models = []
+    if models:
+        suggested = suggest_model(provider, models)
+        ordered = ([suggested] if suggested else []) + [m for m in models if m != suggested]
+        choices = [Choice(f"{m}  (suggested: fast and capable)" if m == suggested else m, m) for m in ordered]
+        return str(_ask(questionary.select(f"Which {provider} model? ({len(models)} available for your key)",
+                                           choices=choices, style=STYLE)))  # fmt: skip
+    return str(_ask(questionary.text(
+        "Model id:", default=PROVIDERS[provider].default_model or "", style=STYLE,
+        instruction=f"(exact id from {provider}'s documentation)",
+        validate=lambda v: bool(v.strip()) or "a model id is required"))).strip()  # fmt: skip
 
 
 def ask_url() -> str:

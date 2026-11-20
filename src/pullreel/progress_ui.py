@@ -29,8 +29,9 @@ LABELS: dict[Stage, str] = {
     "storyboard": "Storyboard",
     "rehearsal": "Rehearsal",
     "recording": "Recording",
-    "render": "Render 60 fps",
+    "render": "Render",
     "gif": "GIF",
+    "exports": "Exports",
 }
 
 

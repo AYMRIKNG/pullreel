@@ -120,3 +120,30 @@ def test_match_focus_attaches_the_right_route() -> None:
     assert match_focus(DIFF, "leur jeu").route == "/adversaires"
     assert match_focus(DIFF, "ajouter un joueur").route == "/joueurs"
     assert match_focus(DIFF, "dark mode toggle").route is None
+
+
+def test_transient_overload_is_retried_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", "g-test")
+    monkeypatch.setattr(agent, "RETRY_DELAYS", (0.0, 0.0, 0.0))
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            return httpx.Response(503, json=[{"error": {"code": 503, "message": "high demand", "status": "UNAVAILABLE"}}])
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"ok": 1}'}}]})
+
+    _mock_http(monkeypatch, handler)
+    out = asyncio.run(chat_json(parse_model_spec("gemini/gemini-x"), [{"role": "user", "content": "x"}]))
+    assert out == '{"ok": 1}' and calls["n"] == 3
+
+
+def test_persistent_overload_gives_a_clean_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", "g-test")
+    monkeypatch.setattr(agent, "RETRY_DELAYS", (0.0, 0.0, 0.0))
+    _mock_http(monkeypatch, lambda r: httpx.Response(
+        503, json=[{"error": {"code": 503, "message": "This model is currently experiencing high demand."}}]))
+    with pytest.raises(LLMError) as err:
+        asyncio.run(chat_json(parse_model_spec("gemini/gemini-x"), [{"role": "user", "content": "x"}]))
+    text = str(err.value)
+    assert "experiencing high demand" in text and "overloaded" in text and "{" not in text

@@ -8,6 +8,7 @@ Secrets implemented here:
 * The mouse never teleports: cubic Bezier paths with controlled curvature, timed with the minimum-jerk law
   ``s(t) = 10t^3 - 15t^4 + 6t^5``. The path is stored analytically so telemetry is perfectly smooth even when
   the OS timer is coarse (Windows sleeps in ~15 ms steps).
+* Captures cursor shape (arrow / pointer / text), keystroke events for the HUD, and per-step captions.
 """
 
 from __future__ import annotations
@@ -33,7 +34,10 @@ from pullreel.models import (
     ActionStep,
     Box,
     CameraMode,
+    CaptionEvent,
     ClickEvent,
+    CursorType,
+    KeyEvent,
     Locator,
     Recording,
     SourceFrame,
@@ -91,6 +95,7 @@ class _State:
     target_zoom: float = 1.0
     focus_box: Box | None = None
     camera_mode: CameraMode = "wide"
+    cursor_type: CursorType = "arrow"
     motion: _Motion | None = None
 
     def mouse_at(self, t: float) -> tuple[float, float]:
@@ -108,16 +113,28 @@ class _Capture:
     first_frame: asyncio.Event = field(default_factory=asyncio.Event)
 
 
+FIELD_ROLES = {"textbox", "searchbox", "spinbutton", "combobox", "listbox"}
+
+
+def _after_label(page: Page, text: str) -> PWLocator:
+    """The first field after a <label> that is not wired to it (no for=, no nesting) - common in React forms."""
+    words = text.replace("'", "").strip()
+    return page.locator("xpath=//label[normalize-space(translate(string(.), '*:', ''))='" + words + "']"
+                        "/following::*[self::input or self::textarea or self::select][1]")  # fmt: skip
+
+
 def resolve_locator(page: Page, loc: Locator) -> PWLocator:
     """Map a semantic storyboard locator to a Playwright locator (first match)."""
     match loc.strategy:
         case "role":
             if loc.name:
                 target = page.get_by_role(loc.value, name=loc.name, exact=False)  # type: ignore[arg-type]
+                if loc.value in FIELD_ROLES:
+                    target = target.or_(_after_label(page, loc.name))
             else:
                 target = page.get_by_role(loc.value)  # type: ignore[arg-type]
         case "label":
-            target = page.get_by_label(loc.value)
+            target = page.get_by_label(loc.value).or_(_after_label(page, loc.value))
         case "placeholder":
             target = page.get_by_placeholder(loc.value)
         case "text":
@@ -151,12 +168,31 @@ _REGION_JS = """
   let e = el, best = el;
   for (let i = 0; i < 8 && e && e !== document.body; i++, e = e.parentElement) {
     const r = e.getBoundingClientRect();
-    if (huge(r)) break;
+    // a whole page, or a long scrolling column (roster, feed): frame the card inside it, not the column
+    if (huge(r) || (e !== el && r.height > innerHeight * 0.9)) break;
     best = e;
     if (big(r) && (preferred(e) || i >= 2)) break;
   }
   const r = best.getBoundingClientRect();
   return [r.x, r.y, r.width, r.height];
+}
+"""
+
+_CURSOR_KIND_JS = """
+(el) => {
+  const tag = (el.tagName || '').toLowerCase();
+  if (tag === 'textarea' || el.isContentEditable) return 'text';
+  if (tag === 'input') {
+    const ty = (el.type || 'text').toLowerCase();
+    if (['checkbox', 'radio', 'button', 'submit', 'reset', 'range', 'color', 'file'].includes(ty)) return 'pointer';
+    return 'text';
+  }
+  const cur = (getComputedStyle(el).cursor || '').toLowerCase();
+  if (cur.includes('text')) return 'text';
+  if (cur.includes('pointer') || tag === 'button' || tag === 'a' || tag === 'select' || tag === 'summary') return 'pointer';
+  const role = (el.getAttribute('role') || '').toLowerCase();
+  if (['button', 'link', 'tab', 'checkbox', 'radio', 'switch', 'option', 'menuitem', 'combobox'].includes(role)) return 'pointer';
+  return 'arrow';
 }
 """
 
@@ -172,6 +208,19 @@ async def result_region(target: PWLocator, fallback: Box) -> Box:
     if x1 - x0 < 8 or y1 - y0 < 8:
         return fallback
     return (x0, y0, x1 - x0, y1 - y0)
+
+
+async def detect_cursor_type(target: PWLocator | None, action: str) -> CursorType:
+    if action == "fill":
+        return "text"
+    if action in ("wait", "show", "scroll", "press"):
+        return "arrow"
+    if target is not None:
+        with contextlib.suppress(PlaywrightError):
+            kind = str(await target.evaluate(_CURSOR_KIND_JS))
+            if kind in ("arrow", "pointer", "text"):
+                return kind  # type: ignore[return-value]
+    return "pointer" if action == "click" else "arrow"
 
 
 # [visible text length, element count]: the page is "ready" once this stops changing.
@@ -257,6 +306,8 @@ class HumanRunner:
         self.state = _State(mouse_x=0.62 * w, mouse_y=0.78 * h)
         self.telemetry: list[TelemetryFrame] = []
         self.clicks: list[ClickEvent] = []
+        self.keys: list[KeyEvent] = []
+        self.captions: list[CaptionEvent] = []
         self._sampling = False
 
     # ------------------------------------------------------------------ telemetry
@@ -277,6 +328,7 @@ class HumanRunner:
                     target_zoom=s.target_zoom,
                     focus_box=s.focus_box,
                     camera_mode=s.camera_mode,
+                    cursor_type=s.cursor_type,
                 )
             )
             next_tick += period
@@ -366,6 +418,7 @@ class HumanRunner:
     async def type_human(self, text: str) -> None:
         for ch in text:
             await self.page.keyboard.type(ch)
+            self.keys.append(KeyEvent(t=time.time(), key=ch, is_shortcut=False))
             delay = self.rng.uniform(0.035, 0.075)
             if ch == " " and self.rng.random() < 0.08:
                 delay += self.rng.uniform(0.060, 0.140)
@@ -382,6 +435,7 @@ class HumanRunner:
 
     # ------------------------------------------------------------------ steps
     async def run_step(self, index: int, step: ActionStep) -> None:
+        step_t0 = time.time()
         box: Box | None = None
         target: PWLocator | None = None
         if step.locator is not None:
@@ -394,40 +448,70 @@ class HumanRunner:
         else:
             self._set_camera(step, box)
 
+        target_cursor = await detect_cursor_type(target, step.action)
+        self.state.cursor_type = "arrow"
+
         match step.action:
             case "wait":
                 pass
             case "show":
                 assert box is not None
-                # Presenter gesture: glide to the label of the result area, slower than a click, never clicking.
                 await self.move_to(*self._aim(box), target_width=max(box[2], 160.0))
             case "hover":
                 assert box is not None
                 await self.move_to(*self._aim(box), target_width=box[2])
+                self.state.cursor_type = target_cursor
             case "click":
                 assert box is not None
                 await self.move_to(*self._aim(box), target_width=box[2])
+                self.state.cursor_type = target_cursor
                 await asyncio.sleep(self.rng.uniform(0.06, 0.12))  # tiny human hesitation
                 await self.click_here()
             case "fill":
                 assert box is not None and target is not None and step.input_value is not None
                 await self.move_to(*self._aim(box), target_width=box[2])
+                self.state.cursor_type = target_cursor
                 await asyncio.sleep(self.rng.uniform(0.05, 0.10))
-                await self.click_here()
+                tag = ""
                 with contextlib.suppress(PlaywrightError):
-                    if await target.input_value(timeout=500):
-                        await self.page.keyboard.press("ControlOrMeta+A")
-                        await self.page.keyboard.press("Backspace")
-                await asyncio.sleep(self.rng.uniform(0.12, 0.22))
-                await self.type_human(step.input_value)
+                    tag = str(await target.evaluate("e => e.tagName.toLowerCase()"))
+                if tag == "select":
+                    await self.click_here()
+                    with contextlib.suppress(PlaywrightError):
+                        await target.select_option(label=step.input_value)
+                else:
+                    await self.click_here()
+                    with contextlib.suppress(PlaywrightError):
+                        if await target.input_value(timeout=500):
+                            await self.page.keyboard.press("ControlOrMeta+A")
+                            self.keys.append(KeyEvent(t=time.time(), key="ControlOrMeta+A", is_shortcut=True))
+                            await self.page.keyboard.press("Backspace")
+                            self.keys.append(KeyEvent(t=time.time(), key="Backspace", is_shortcut=True))
+                    await asyncio.sleep(self.rng.uniform(0.12, 0.22))
+                    await self.type_human(step.input_value)
             case "press":
                 assert step.input_value is not None
                 await self.page.keyboard.press(step.input_value)
+                self.keys.append(KeyEvent(t=time.time(), key=step.input_value, is_shortcut=True))
             case "scroll":
                 delta = float(step.input_value) if step.input_value is not None else 400.0
                 if box is None:
                     await self.smooth_scroll(delta)
         await asyncio.sleep(step.dwell_after_ms / 1000.0)
+        step_t1 = time.time()
+        cap_text = (step.caption or "").strip()
+        if cap_text or step.action in ("click", "fill", "show"):
+            self.captions.append(
+                CaptionEvent(
+                    t_start=step_t0,
+                    t_end=step_t1,
+                    text=cap_text,
+                    step_index=index,
+                    action=step.action,
+                    focus_box=self.state.focus_box or box,
+                )
+            )
+        self.state.cursor_type = "arrow"
 
     async def final_hold(self, steps: list[ActionStep]) -> None:
         last = steps[-1]
@@ -516,7 +600,7 @@ async def record(
                     for i, step in enumerate(storyboard.steps):
                         what = f"{step.action} {step.locator.describe()}" if step.locator else step.action
                         if step.input_value and step.action == "fill":
-                            what += f" ← {step.input_value!r}"
+                            what += f" <- {step.input_value!r}"
                         say(report, "recording", detail=f"step {i + 1}/{n_steps} · {what}", completed=i, total=n_steps)
                         await runner.run_step(i, step)
                     say(report, "recording", detail="closing hold", completed=n_steps, total=n_steps)
@@ -542,6 +626,10 @@ async def record(
         frames=frames,
         telemetry=runner.telemetry,
         clicks=runner.clicks,
+        keys=runner.keys,
+        captions=runner.captions,
+        url=url,
+        feature_summary=storyboard.feature_summary,
         t_start=t_start,
         t_end=t_end,
     )

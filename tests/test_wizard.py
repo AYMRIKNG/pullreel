@@ -56,7 +56,10 @@ def test_custom_scenario_keeps_the_user_text_and_finds_the_page() -> None:
     assert pick.title == "ajouter un joueur puis ouvrir sa fiche"
     assert pick.why.startswith("user request")
     assert pick.route == "/statjoueurs"
-    assert "FEATURE_TO_SHOW: ajouter un joueur" in pick.to_prompt()
+    assert pick.user_requested
+    prompt = pick.to_prompt()
+    assert "USER_SCENARIO (mandatory, written by the user): ajouter un joueur puis ouvrir sa fiche" in prompt
+    assert "fill EVERY visible field" in prompt  # a creation journey: open the form, fill it, submit, show the result
 
 
 def test_remembered_setup_and_consented_key_live_outside_the_repo(tmp_path: Path) -> None:

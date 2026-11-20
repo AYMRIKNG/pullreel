@@ -2,9 +2,13 @@
 
 <h1>PullReel</h1>
 
-<p><strong>Turn your git diff into a cinematic, ScreenStudio-style demo GIF for your pull request — locally, in one command.</strong></p>
+<p><strong>Turn your git diff into a studio-grade, ScreenStudio-style demo video for pull requests, landing pages, release notes, and social media — locally, in one command.</strong></p>
 
-<p>Local-first · Ollama by default · no account · 60 fps MP4 + GitHub-ready GIF</p>
+<p>Local-first · Ollama or Cloud AI · 60 fps MP4 / WebM / animated WebP / GIF · Smart 16:9 / 1:1 / 9:16 / 4:5 reframing · <code>pullreel.toml</code> branding</p>
+
+<a href="docs/showcase.mp4"><img src="docs/showcase.gif" alt="PullReel demo: a task gets checked off with a spring camera, a vector cursor, captions and a window frame" width="100%" /></a>
+
+<sub>Made by PullReel itself with <code>pullreel demo --aspect 16:9 --quality ultra --url-bar --intro --outro</code> · <a href="docs/showcase.mp4">watch the 60 fps MP4</a></sub>
 
 </div>
 
@@ -18,7 +22,7 @@
     <td width="50%" align="center">
       <img src="docs/after.gif" alt="PullReel output" width="100%" />
       <br />
-      <sub><strong>PullReel</strong> — 2x capture, spring camera, cursor, studio frame</sub>
+      <sub><strong>PullReel</strong> — 2x capture, spring camera, vector cursor, studio frame</sub>
     </td>
   </tr>
 </table>
@@ -27,20 +31,18 @@
 
 ## Try it in one command
 
-<!-- `uvx pullreel` works once the package is published to PyPI -->
-
 ```bash
-uvx pullreel demo
+pullreel demo --aspect 16:9 --quality ultra
 ```
 
 Or run from source:
 
 ```bash
 git clone https://github.com/AYMRIKNG/pullreel && cd pullreel
-uv run pullreel demo
+uv run pullreel demo --aspect 16:9 --quality ultra
 ```
 
-`demo` records a bundled sample page with no LLM and no configuration. The first run downloads Chromium once; after that, a full run takes about 20 s on a laptop and writes `demo.mp4`, `demo.gif`, and `demo-poster.png` to `pullreel-out/`.
+`demo` records a bundled sample page with no LLM and no configuration. The first run downloads Chromium once; after that, a run writes `demo.mp4`, `demo.gif`, and the money-shot `demo-poster.png` to `pullreel-out/` (plus `.webp`, `.webm`, and an annotated `-screenshots.png` sheet when enabled).
 
 ## Use it on your branch
 
@@ -50,95 +52,143 @@ Start your dev server, then from your project folder just run:
 pullreel
 ```
 
-The assistant asks which AI should direct (a local Ollama model, or a cloud provider with your API key — kept only if you say so, in your user settings, never in the repo), finds your running dev server, then analyzes the branch and lists **every interesting scenario**: the Scout's picks are starred and pre-checked, every other candidate stays selectable, and **✍ Write my own scenario…** lets you describe exactly what to show. Select several with the space bar and it films one video per scenario into `pullreel-out/` (`01-coaching.mp4`, `02-…`). If the app asks for a login, it offers to sign you in first.
+The assistant asks which AI should direct (a local Ollama model, or a cloud provider with your API key), finds your running dev server, analyzes the branch, ranks every scenario by **sales value**, and flags any scenario that modifies app state (`[mutates]`). Select several with the space bar or choose **Write my own scenario…** — PullReel always respects your custom request and never silently replaces it with another demo.
 
 ```text
 ? Which scenarios should I film?  (space = select · a = all · enter = confirm)
- » ◉ ★ Coaching analytics  /coaching  — player combinations and match situations
-   ◉ ★ Team defense  /statequipe  — new Analyse tab from opponent shots
-   ○   StatJoueursPage  /statjoueurs  — Page Adversaires, gestion des joueurs
-   ○   SettingPage  /settings  — fiche de match partageable et réglages
+ » ◉ ★ Add a new player to Roster  /roster  [score 86 · mutates]  — new creation modal
+   ◉ ★ Coaching analytics  /coaching  [score 78]  — player combinations and match situations
+   ○   Team defense  /statequipe  [score 71]  — new Analyse tab from opponent shots
      ───────────
    ○ ✍  Write my own scenario…
 ```
 
-Prefer flags (scripts, CI)? Everything is also available non-interactively:
+Prefer flags (scripts, CI)? Everything is available non-interactively:
 
 ```bash
-pullreel record --url http://localhost:3000 --base main --out pr-demo.gif
+pullreel record --url http://localhost:3000 --base main --aspect 16:9 --resolution 1080p --quality standard --out pr-demo.gif
 ```
 
-1. **Diff** — inspects `merge-base(base, HEAD)` against your working tree (including uncommitted and untracked files), ignoring lockfiles and build artifacts, to extract changed routes, components, labels, test IDs, and handlers.
-2. **Storyboard** — opens the app, captures Playwright's ARIA snapshot and visible interactive elements, and asks the LLM for a grounded 5–12 s storyboard focused on the delta.
-3. **Human-paced recording** — drives headless Chromium at 2x Retina with curved mouse paths, natural typing cadence, CDP screencast capture, and 60 Hz telemetry.
-4. **Cinematic render** — applies a spring camera, synthetic cursor, click ripples, and studio chassis, then encodes a 60 fps H.264 MP4 and an adaptive GitHub-ready GIF (< 10 MB, GitHub's limit), alongside `<stem>-poster.png` and `<stem>.storyboard.json`.
+## Studio rendering & formats
 
-Drag `pr-demo.gif` (or the sharper `pr-demo.mp4` — GitHub plays it inline) into your PR description.
+PullReel renders production-ready visuals directly from 2x Retina (`2560×1600`) CDP screencasts through a parallel, zero-disk-PNG pipeline piped straight into FFmpeg:
 
-### Choosing what to film
+- **Polished studio chassis**: solid colors, angled gradients, built-in presets (`studio`, `midnight`, `aurora`, `sunset`, `ocean`, `carbon`, `light`), or a Gaussian-blurred custom wallpaper; **macOS**, **Windows**, or **none** window chrome; adjustable corner radius, soft drop shadow, padding, and an optional browser URL bar (`--url-bar`).
+- **Cinematic spring camera**: critically damped spring (`ω=6.5, ζ=1`) with lookahead anticipation, smoothed transitions between focus boxes, zoom-dip on long pans, generous focus padding so zoomed elements are never clipped, and speed-proportional temporal motion blur.
+- **High-resolution vector cursors**: 8x supersampled **arrow**, **pointing hand**, and **I-beam** cursors automatically matched to the target element, with press squash (`0.90`), soft drop shadow, fast-movement motion trail, and dual-ring click ripples.
+- **Animated text overlays** (bundled **Inter** variable font under SIL OFL 1.1): ease-out **intro title cards** (`--intro`), **outro CTA cards** (`--outro`), per-step **captions** (`caption` on each `ActionStep`), and a bottom-right **keystroke HUD** during typing and shortcuts.
+- **Smart reframing**: `--aspect 16:9|1:1|9:16|4:5` dynamically crops and tracks the `focus_box` and cursor without stretching or letterboxing.
+- **Money-shot poster & doc screenshots**: automatically selects the sharpest settled focus/payoff frame for `<stem>-poster.png`, and `--screenshots` generates an annotated contact sheet (`<stem>-screenshots.png`) plus individual step PNGs with highlight rings for documentation.
 
-Before writing any storyboard, a **Scout** step reads the project description (package.json, README), the commit messages and the *feature candidates* — changed files grouped by the page where they show up (file-based routes, React Router `<Route>` tables and their imports), scored by size, new files, new UI labels and commits. It picks the most demo-worthy, user-visible changes, then each storyboard is planned on **that feature's own page**.
+### Formats & resolutions
 
-```bash
-pullreel record --url http://localhost:3000 --scenarios 3      # 3 features -> pr-demo-1.gif, pr-demo-2.gif, pr-demo-3.gif
-pullreel record --url http://localhost:3000 --focus "global search"   # you choose the feature
-pullreel diff --prompt                                            # see the candidates and commits the AI receives
-pullreel record --url http://localhost:3000 --scenarios all --director composer   # every feature, no AI at all
+| Format / Asset | Flag / Config | Codec / Details | Best for |
+| --- | --- | --- | --- |
+| **MP4** | default (`mp4`) | H.264 `yuv420p`, `+faststart` | GitHub PRs, landing pages, Product Hunt, X/LinkedIn |
+| **WebM** | `--webm` or `--formats mp4,webm` | VP9 (`libvpx-vp9`, `-b:v 0 -row-mt 1`) | Lightweight web embeds |
+| **Animated WebP** | `--webp` or `--formats mp4,webp` | `libwebp_anim`, 24-bit color, looping | Release notes, docs, changelogs |
+| **GIF** | `--gif` / `--out demo.gif` | Adaptive 2-pass palette (`< 9.5 MB`) | GitHub PR comments |
+| **Poster PNG** | automatic (`<stem>-poster.png`) | Best money-shot frame | Video thumbnails & social cards |
+| **Screenshots sheet** | `--screenshots` | Annotated contact sheet + per-step PNGs | Product docs & step-by-step guides |
+
+| `--resolution` | `16:9` | `1:1` | `9:16` | `4:5` |
+| --- | --- | --- | --- | --- |
+| `1080p` | `1920×1080` | `1080×1080` | `1080×1920` | `1080×1350` |
+| `1440p` | `2560×1440` | `1440×1440` | `1440×2560` | `1440×1800` |
+| `4k` | `3840×2160` | `2160×2160` | `2160×3840` | `2160×2700` |
+
+### Quality presets (`--quality`)
+
+| Preset | FPS | CRF | Motion blur | x264 preset | Notes |
+| --- | --- | --- | --- | --- | --- |
+| `draft` | 30 | 24 | Off (`0.0`) | `veryfast` | Fast previews, scaled down for rapid iteration |
+| `standard` | 60 | 18 | Medium (`0.35`) | `medium` | Default balanced quality & speed |
+| `ultra` | 60 | 15 | Rich (`0.50`, 3 subframes) | `slow` | Maximum crispness for launches & landing pages |
+
+## Branding with `pullreel.toml`
+
+Place a `pullreel.toml` at the root of your target repository (or pass `--config FILE`). PullReel loads and validates it with Pydantic automatically; CLI flags always override `pullreel.toml`.
+
+```toml
+[brand]
+name = "Acme"
+primary_color = "#09090B"
+accent_color = "#8B5CF6"
+logo = "assets/logo.png"          # optional PNG/SVG-rendered raster logo
+# font = "assets/CustomFont.ttf"  # optional; defaults to bundled Inter (OFL)
+
+[theme]
+background_preset = "midnight"    # studio | midnight | aurora | sunset | ocean | carbon | light
+# background_style = "wallpaper"  # studio | solid | gradient | wallpaper
+# wallpaper = "assets/bg.jpg"
+# wallpaper_blur = 36
+window_chrome = "macos"           # macos | windows | none
+show_url_bar = true
+radius_px = 16
+padding_px = 56
+shadow_blur = 48
+shadow_alpha = 0.55
+show_captions = true
+show_keystrokes = true
+
+[intro]
+enabled = true
+title = "Acme Inbox"
+subtitle = "Triage issues in half the time"
+duration_s = 1.6
+
+[outro]
+enabled = true
+title = "Built with Acme"
+cta = "acme.dev"
+duration_s = 1.6
+
+[render]
+aspect = "16:9"                   # 16:9 | 1:1 | 9:16 | 4:5
+resolution = "1080p"              # native | 1080p | 1440p | 4k
+quality = "standard"              # draft | standard | ultra
+formats = ["mp4", "gif", "webp"]  # mp4 | webm | gif | webp
+screenshots = true
+
+[safety]
+dry_rehearsal = false
+extra_blocklist = ["purge", "archive"]
 ```
 
-### Stories, not click tours
+## Concrete user journeys & safety
 
-Every scenario is directed as a short story that sells one feature: an establishing shot, a first use followed by a **`show` payoff** (the camera frames the table / chart / card that changed, the cursor points at it like a presenter), 2–4 **escalations** of the same feature, a **money shot** held longer, then a wide hold — 15–30 s, never wandering off to another page.
+PullReel directs real business journeys instead of random click tours:
 
-Two directors produce it, and the better film wins (`--director auto`, the default):
-
-- **AI director** — writes a draft, rehearses it on the live app while observing what each click changed (*"a table 'On court' appeared, 2 → 4 → 8 rows"*), then rewrites the story with that knowledge.
-- **Automatic composer** — explores the feature page by itself: finds groups of look-alike controls (player chips, filters, options, tabs — never the sidebar, never destructive buttons), clicks them one after another, keeps the group that drives a visible result and composes the escalating story from it. Deterministic, fast, no model needed (`--director composer`); also the safety net when an AI story is thin or fails.
-
-Each rehearsed story gets a quality score (actions that change something, payoff shots, escalation, length, staying on the page); in `auto` mode a thin AI story is replaced by the composed one.
-
-Want to review or tweak the shots before recording?
-
-```bash
-pullreel plan --url http://localhost:3000 --base main -o storyboard.json
-# inspect or edit steps, zoom, dwell_after_ms
-pullreel record --url http://localhost:3000 -s storyboard.json --out pr-demo.gif
-```
-
-### Apps behind a login
-
-PullReel never types credentials, and stops with a clear message when it lands on a login form instead of letting a model invent a password. Sign in once, yourself:
-
-```bash
-pullreel login --url http://localhost:3000
-```
-
-A real browser window opens; sign in however you normally do (password, Google, SSO), then press Enter in the terminal or just close the window. PullReel saves only the resulting session — cookies, localStorage and IndexedDB — to `.pullreel/auth.json`, inside a folder that git-ignores itself. `record` and `plan` pick it up automatically (or pass `--auth FILE`). Delete the file to sign out; if the session expires, PullReel tells you to run `login` again.
+- **Workflow detection**: automatically detects entity creation (`+ Add…`, `New…`, `Create…` modals/forms), editing, search/filter, comparison, export/import, and settings flows, giving each a clear business title (*"Add a new player in Team Roster"*, not *"Click Add"*).
+- **Realistic, safe form filling**: generates domain-coherent names, numbers (within `min`/`max`), dates, and `<select>` choices from field metadata. Emails always use `@example.com`; password, card, CVV, IBAN, and API-key fields are strictly refused.
+- **Multi-page journeys**: storyboards with `"journey": true` can span 2–3 pages (e.g. list → detail → list) without being treated as navigation errors.
+- **Mutation safety**: mutating scenarios are flagged (`mutates: true`), display a yellow warning before recording, enforce an extended destructive-action blocklist (delete, remove, reset, revoke, sign out, deactivate, etc.), and support `--dry-rehearsal` (rehearses the entire form flow and verifies the submit button without clicking submit).
+- **User intent respected**: when you pass `--focus "..."` or pick **Write my own scenario…**, PullReel strictly follows your request and never substitutes an unrelated auto-composed demo if the AI fails.
 
 ## Commands
 
 | Command | Purpose |
 | --- | --- |
-| `pullreel` (or `pullreel start`) | Interactive assistant: choose the AI, review every scenario, multi-select or write your own, film them. |
-| `pullreel record --url URL` | Full pipeline: diff, plan (or `-s FILE`), record, render MP4/GIF, poster, and storyboard JSON. |
-| `pullreel plan --url URL -o FILE` | Dry run: analyze the branch, ground the storyboard against the live page, write JSON. |
+| `pullreel` (or `pullreel start`) | Interactive assistant: choose AI, review sales-ranked scenarios, multi-select or write your own, film them. |
+| `pullreel record --url URL` | Full pipeline: diff, plan (or `-s FILE`), record, render MP4/WebM/WebP/GIF, poster, screenshots, storyboard JSON. |
+| `pullreel plan --url URL -o FILE` | Dry run: analyze the branch, ground the storyboard against the live page (supports `--dry-rehearsal`), write JSON. |
+| `pullreel render DIR_OR_JSON` | Re-render a saved `--keep-frames` recording with new aspect/resolution/quality/theme settings without launching a browser. |
 | `pullreel models` | List AI providers and whether each is ready (local server running, API key found). |
 | `pullreel login --url URL` | Sign in once in a visible browser; saves only the session for `record` / `plan`. |
-| `pullreel render DIR_OR_JSON` | Re-render a saved `--keep-frames` recording without launching a browser. |
 | `pullreel diff [--base main]` | Inspect what PullReel extracted from the branch (`--prompt` prints the exact LLM input). |
 | `pullreel demo [-o pullreel-out]` | Record and render the bundled demo page with no LLM or project setup. |
 
-Passing `--out pr-demo.gif` writes both `pr-demo.mp4` and `pr-demo.gif`. Passing `--out pr-demo.mp4` writes only the MP4 unless `--gif` is set.
+Add `--verbose` / `-v` for debug logging or `--log-file pullreel.jsonl` for structured JSONL logs (API keys and bearer tokens are automatically redacted).
 
 ## Models
 
-Set `--model` (or `PULLREEL_MODEL`) using a provider prefix. The default is `ollama/qwen2.5-coder:7b`; a bare model name (`llama3.2`) means Ollama. Run `pullreel models` to see which providers are ready on your machine (keys are detected, never displayed).
+Set `--model` (or `PULLREEL_MODEL`) using a provider prefix. The default is `ollama/qwen2.5-coder:7b`; a bare model name (`llama3.2`) means Ollama. Run `pullreel models` to see which providers are ready on your machine.
 
 | Prefix | Default model | Key | Notes |
 | --- | --- | --- | --- |
-| `ollama/<model>` | `qwen2.5-coder:7b` | — | Default. Local; native `/api/chat` with the JSON schema as grammar-constrained output, 16k context, thinking off. |
+| `ollama/<model>` | `qwen2.5-coder:7b` | — | Default. Local; native `/api/chat` with grammar-constrained JSON schema. |
 | `lmstudio/<model>` | — | — | Local OpenAI-compatible server (`localhost:1234`). |
-| `anthropic/<model>` | `claude-sonnet-5-5` | `ANTHROPIC_API_KEY` | Claude via the Messages API, answer forced through a tool with our schema. |
+| `anthropic/<model>` | `claude-sonnet-5-5` | `ANTHROPIC_API_KEY` | Claude via the Messages API with forced tool-use JSON. |
 | `openai/<model>` | — | `OPENAI_API_KEY` | `json_schema` structured output. |
 | `gemini/<model>` | — | `GEMINI_API_KEY` / `GOOGLE_API_KEY` | Google's OpenAI-compatible endpoint. |
 | `mistral/<model>` | — | `MISTRAL_API_KEY` | |
@@ -146,129 +196,67 @@ Set `--model` (or `PULLREEL_MODEL`) using a provider prefix. The default is `oll
 | `openrouter/<model>` | — | `OPENROUTER_API_KEY` | Hundreds of models behind one key. |
 | `groq/<model>` | — | `GROQ_API_KEY` | Very fast inference. |
 
-`--api-key` (or `PULLREEL_API_KEY`) overrides the key and `--base-url` (`PULLREEL_BASE_URL`) the endpoint. PullReel only reads keys from your environment and never writes them to disk. OpenAI-compatible endpoints get the strictest output format they accept (`json_schema`, then `json_object`, then plain text).
-
-```bash
-ANTHROPIC_API_KEY=sk-ant-... pullreel record --url http://localhost:3000 --model anthropic
-PULLREEL_MODEL=ollama/qwen2.5-coder:7b pullreel plan --url http://localhost:3000
-```
-
-## How it works
-
-```text
-git diff ──> diff_analyzer ──> DiffSummary ──┐
-                                             ├──> storyboard_agent (LLM) ──> Storyboard JSON
-app URL  ──> Playwright ARIA snapshot ───────┘              ^                       │
-                                                            │ error + live state    v
-                                                            └─── rehearsal & grounding loop (<=3x)
-                                                                                    │
-  MP4 + GIF <── exporter (ffmpeg) <── cinema_engine <── human_runner <──────────────┘
-                H.264 + <10 MB GIF    spring camera     Chromium 2x, CDP screencast,
-                                      cursor, frame     60 Hz telemetry
-```
-
-| Module | Responsibility |
-| --- | --- |
-| `src/pullreel/diff_analyzer.py` | Git diff extraction, route inference (Next.js, SvelteKit, Nuxt, Remix, Astro, Django, FastAPI/Flask), UI symbol/label digest (capped at 6000 chars). |
-| `src/pullreel/storyboard_agent.py` | Live ARIA snapshot, LLM prompt & structured output, normalization, Pydantic validation, pacing rules, and live rehearsal/grounding. |
-| `src/pullreel/human_runner.py` | 2x Retina Chromium driver, CDP `Page.startScreencast`, Bézier mouse & typing simulation, 60 Hz telemetry. |
-| `src/pullreel/cinema_engine.py` | Spring camera solver, 8x supersampled cursor sprite, click squash/ripple, and dark studio compositing. |
-| `src/pullreel/exporter.py` | FFmpeg H.264 MP4 (`crf 18`, 60 fps, `faststart`), two-stage palette GIF under 10 MB, and PNG poster export. |
-| `src/pullreel/models.py` | Pydantic contracts (`DiffSummary`, `Storyboard`, `Recording`, `StudioTheme`, `RenderSettings`). |
-| `src/pullreel/cli.py` | Typer CLI (`record`, `plan`, `render`, `diff`, `demo`) and Rich progress output. |
-
-## The craft
-
-### Retina 2x capture
-Chromium renders a `1280×800` viewport at `device_scale_factor=2` (`2560×1600`) and streams frames via CDP `Page.startScreencast` (JPEG q92, ~28 captures/s) instead of Playwright's blurry WebM recorder. Up to 2x zoom only ever downsamples with an area filter, so UI text stays sharp.
-
-### Minimum-jerk Bezier mouse
-Pointer paths follow cubic Bézier curves with random perpendicular curvature, Fitts-like travel times (0.35–1.1 s), and the minimum-jerk law `s(t) = 10t³ − 15t⁴ + 6t⁵`. Real `mouse.move` events fire hover states, clicks hold 70–110 ms, typing runs 35–75 ms/char, and the trajectory is stored analytically at 60 Hz.
-
-### Critically damped spring camera
-Camera `(x, y, zoom)` integrates `a = ω²(target − x) − 2ζω·v` (`ω = 6.5` rad/s, `ζ = 1`, semi-implicit Euler with 4 substeps) while reading telemetry 250 ms ahead so zooms anticipate clicks. Focus shots blend 80% element centre + 20% cursor, pan mode uses a 30% deadzone, and every crop stays clamped inside `2560×1600`.
-
-### Synthetic cursor, click ripple, and studio frame
-Headless Chromium draws no pointer, so PullReel composites an 8x supersampled arrow with white outline, soft shadow, sub-pixel placement, 0.88 press squash, and a 250 ms fading click ripple. The frame sits on a `#09090B` backdrop with faint centre light, drop shadow, 16 px rounded corners, 1 px `#27272A` border, and 56 px padding (`1392×912` output).
-
-## Zero hallucinated selectors
-
-PullReel directs the LLM to target only semantic locators (`role` + `name`, `label`, `placeholder`, `text`, `testid`; `css` is discouraged) drawn from the live ARIA snapshot. After normalizing small-model slips, validating with Pydantic, and enforcing pacing guardrails (400 ms wide opening, `fill` always in focus, focus zoom 1.3–1.9x, 1 s closing hold, ≤ 12 s total), it rehearses the entire storyboard at full speed in a fresh browser. Every locator must resolve at the exact moment it runs — including elements created by earlier steps. Misses are fuzzy-repaired against live elements; unresolved errors and current page state are sent back to the model for up to 3 attempts.
-
 ## Storyboard format
 
 ```json
 {
-  "feature_summary": "Filter issues and export the filtered view to CSV",
-  "start_path": "/issues",
+  "feature_summary": "Add a new player to the roster and inspect their row",
+  "start_path": "/roster",
+  "journey": false,
+  "mutates": true,
   "steps": [
     {
       "action": "wait",
       "camera": { "mode": "wide", "zoom": 1.0 },
-      "dwell_after_ms": 400
-    },
-    {
-      "action": "fill",
-      "locator": { "strategy": "placeholder", "value": "Search issues..." },
-      "input_value": "billing export",
-      "camera": { "mode": "focus", "zoom": 1.75 },
-      "dwell_after_ms": 450
+      "dwell_after_ms": 800
     },
     {
       "action": "click",
-      "locator": { "strategy": "role", "value": "button", "name": "Export CSV" },
-      "camera": { "mode": "focus", "zoom": 1.5 },
-      "dwell_after_ms": 600
+      "locator": { "strategy": "role", "value": "button", "name": "+ Add player" },
+      "camera": { "mode": "focus", "zoom": 1.65 },
+      "dwell_after_ms": 600,
+      "caption": "Open the new player dialog"
+    },
+    {
+      "action": "fill",
+      "locator": { "strategy": "label", "value": "Player name" },
+      "input_value": "Alex Moreau",
+      "camera": { "mode": "focus", "zoom": 1.75 },
+      "dwell_after_ms": 500,
+      "caption": "Enter player details"
+    },
+    {
+      "action": "click",
+      "locator": { "strategy": "role", "value": "button", "name": "Save player" },
+      "camera": { "mode": "focus", "zoom": 1.6 },
+      "dwell_after_ms": 900,
+      "caption": "Save to the live roster"
+    },
+    {
+      "action": "show",
+      "locator": { "strategy": "text", "value": "Alex Moreau" },
+      "camera": { "mode": "focus", "zoom": 1.45 },
+      "dwell_after_ms": 1800,
+      "caption": "New player appears immediately"
     },
     {
       "action": "wait",
       "camera": { "mode": "wide", "zoom": 1.0 },
-      "dwell_after_ms": 1000
+      "dwell_after_ms": 1400
     }
   ]
 }
 ```
 
-## Requirements & troubleshooting
-
-<details>
-<summary>Environment, proxies, Ollama, GPU sizing, and timings</summary>
-
-- **Runtime**: Python 3.12+ and [`uv`](https://docs.astral.sh/uv/).
-- **FFmpeg**: Optional. PullReel uses `ffmpeg` from `PATH` if present, otherwise falls back to the static binary bundled by `imageio-ffmpeg`.
-- **Chromium**: Installed automatically by Playwright on the first run.
-- **Corporate TLS proxy** (`invalid peer certificate: UnknownIssuer`): pass `--system-certs` to `uv`, e.g. `uv sync --system-certs`.
-- **Ollama not running**: Start the daemon with `ollama serve`.
-- **Model not pulled**: Run `ollama pull qwen2.5-coder:7b` (or pull whichever model you pass to `--model`).
-- **Small GPU (e.g. 4 GB VRAM)**: Stick to 7B models. On a 4 GB laptop GPU, local 26B models took 50–175 s just to plan; 7B models are substantially faster.
-- **Typical timings & sizes**: `pullreel demo` runs in about 20 s on a laptop (~1 MB for a 6.7 s 60 fps MP4, ~4.7 MB GIF). GIF export starts at 960 px / 30 fps and adapts width (down to 720 px) then fps to stay under 9.5 MB (GitHub accepts GIFs up to 10 MB).
-
-</details>
-
-## Roadmap
-
-Planned next, not yet implemented:
-
-- GitHub Action that comments the rendered demo GIF directly on pull requests
-- Additional studio themes (including a light studio backdrop)
-- Multi-page navigation flows
-
 ## Contributing
 
 ```bash
 uv sync
-uv run pytest
+uv run pytest -q
 ```
 
-74 tests cover the diff analyzer (including real temporary git repos), the storyboard agent and AI providers, the automatic composer, login handling, the interactive assistant and the CLI helpers.
-
-To regenerate the README comparison GIFs:
-
-```bash
-uv run pullreel demo --out docs --keep-frames
-uv run python scripts/make_readme_gifs.py <kept-frames-dir> docs
-```
+All tests run locally with zero network access (synthetic recordings and local HTML pages).
 
 ## License
 
-MIT
+MIT (bundled Inter font under SIL Open Font License 1.1; see `src/pullreel/assets/fonts/OFL.txt`).

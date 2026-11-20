@@ -1,6 +1,6 @@
 [project]
 name = "pullreel"
-version = "0.1.0"
+version = "0.2.0"
 description = "Turn a git diff into a cinematic, ScreenStudio-style UI demo video for your Pull Request."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -23,6 +23,7 @@ dependencies = [
     "httpx>=0.27",
     "imageio-ffmpeg>=0.5",
     "questionary>=2.0",
+    "truststore>=0.10",
 ]
 
 [project.scripts]

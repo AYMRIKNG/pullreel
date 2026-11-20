@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
-Stage = Literal["diff", "scout", "snapshot", "storyboard", "rehearsal", "recording", "render", "gif"]
+Stage = Literal["diff", "scout", "snapshot", "storyboard", "rehearsal", "recording", "render", "gif", "exports"]
 State = Literal["start", "update", "done", "fail"]
 
 

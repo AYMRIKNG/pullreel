@@ -40,7 +40,7 @@ def test_help_lists_all_commands() -> None:
 def test_version_works_without_a_command() -> None:
     result = CliRunner().invoke(app, ["--version"])
     assert result.exit_code == 0
-    assert "pullreel 0.1.0" in result.output
+    assert "pullreel 0.2.0" in result.output
 
 
 def test_record_requires_url() -> None:

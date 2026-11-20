@@ -107,3 +107,50 @@ def test_all_scenarios_need_no_scout_model_and_skip_unopenable_pages() -> None:
     dead = LLMConfig(model="none", base_url="http://127.0.0.1:9/v1", provider="ollama", ollama_native=True)
     picks = asyncio.run(scout_features(diff, dead, 3))
     assert [p.route for p in picks] == ["/coaching", "/settings"]
+
+
+SECTIONS_PAGE = """<!doctype html><title>Coaching</title>
+<style>.tab,.flt{cursor:pointer;display:inline-block;padding:6px;margin:3px;border:1px solid #777}</style><body>
+<div class="tabs"><div class="tab" onclick="tab('lineups')">Lineups</div>
+  <div class="tab" onclick="tab('situations')">Situations</div><div class="tab" onclick="tab('streaks')">Streaks</div></div>
+<div id="panel"><h3>Lineups</h3><p>Pick players</p></div>
+<script>
+function tab(t) {
+  const p = document.getElementById('panel');
+  if (t === 'situations') {
+    p.innerHTML = '<h3>Match situations</h3><div class="filters">' +
+      ['Money time', 'Quarter ends', 'Tip-off', 'After halftime'].map(f => `<div class="flt" onclick="pick('${f}')">${f}</div>`).join('') +
+      '</div><div id="res"></div>';
+  } else if (t === 'streaks') {
+    p.innerHTML = '<h3>Scoring streaks</h3><table><thead><tr><th>Run</th><th>Pts</th></tr></thead><tbody><tr><td>Q2</td><td>12-0</td></tr></tbody></table>';
+  } else { p.innerHTML = '<h3>Lineups</h3><p>Pick players</p>'; }
+}
+function pick(f) {
+  document.getElementById('res').innerHTML =
+    `<table><thead><tr><th>Player in ${f}</th><th>+/-</th></tr></thead><tbody>${'<tr><td>x</td><td>+1</td></tr>'.repeat(f.length % 5 + 1)}</tbody></table>`;
+}
+</script></body>"""
+
+
+def test_deep_exploration_finds_a_section_and_escalates_inside_it(tmp_path: Path) -> None:
+    from pullreel.composer import compose_chapter, explore_page
+
+    page = tmp_path / "coaching.html"
+    page.write_text(SECTIONS_PAGE, encoding="utf-8")
+
+    async def run() -> list:
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch()
+            try:
+                return await explore_page(browser, page.as_uri(), time_budget_s=90)
+            finally:
+                await browser.close()
+
+    chapters = asyncio.run(run())
+    situations = next(c for c in chapters if c.title == "Situations")
+    assert situations.inner is not None and situations.inner.effective_count >= 3
+    sb = compose_chapter(situations, "Every match situation, one click each", "/")
+    clicks = [s.locator.value for s in sb.steps if s.action == "click"]
+    assert clicks[0] == "Situations"  # open the section first...
+    assert {"Quarter ends", "Tip-off"} <= set(clicks)  # ...then escalate through the filters inside it
+    assert sum(1 for s in sb.steps if s.action == "show") >= 3

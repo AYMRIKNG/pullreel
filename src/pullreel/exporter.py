@@ -1,4 +1,4 @@
-"""FFmpeg pipeline: raw BGR frames -> MP4 (H.264, 60 fps, crf 18) -> GitHub-friendly GIF (two-stage palette)."""
+"""FFmpeg pipeline: raw BGR frames -> MP4 (H.264), WebM (VP9), animated WebP, GitHub-friendly GIF, poster & screenshots."""
 
 from __future__ import annotations
 
@@ -9,13 +9,16 @@ import os
 import shutil
 import subprocess
 import sys
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
 import numpy as np
 from numpy.typing import NDArray
+
+from pullreel.models import StudioTheme
+from pullreel.overlays import build_screenshot_sheet
 
 GIF_START_WIDTH = 960
 GIF_MIN_WIDTH = 640
@@ -89,6 +92,7 @@ def export_mp4(
     out_path: Path,
     *,
     crf: int = 18,
+    preset: str = "medium",
     on_frame: Callable[[], None] | None = None,
 ) -> Path:
     w, h = size
@@ -98,7 +102,7 @@ def export_mp4(
     cmd = [
         find_ffmpeg(), "-y", "-hide_banner", "-loglevel", "error",
         "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{w}x{h}", "-r", str(fps), "-i", "-",
-        "-c:v", "libx264", "-preset", "medium", "-crf", str(crf), "-tune", "animation",
+        "-c:v", "libx264", "-preset", preset, "-crf", str(crf), "-tune", "animation",
         "-pix_fmt", "yuv420p", "-movflags", "+faststart",
         str(out_path),
     ]  # fmt: skip
@@ -123,6 +127,50 @@ def export_mp4(
     stderr = proc.stderr.read().decode("utf-8", "replace") if proc.stderr else ""
     if proc.wait() != 0:
         raise ExportError(f"ffmpeg (mp4) failed:\n{stderr[-2500:]}")
+    return out_path
+
+
+def export_webm(
+    mp4_path: Path,
+    out_path: Path,
+    *,
+    crf: int = 28,
+    cpu_used: int = 4,
+) -> Path:
+    """Encode a crisp VP9 WebM suitable for landing pages and modern browsers."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        find_ffmpeg(), "-y", "-hide_banner", "-loglevel", "error",
+        "-i", str(mp4_path),
+        "-c:v", "libvpx-vp9", "-b:v", "0", "-crf", str(crf),
+        "-deadline", "good", "-cpu-used", str(cpu_used), "-row-mt", "1",
+        "-pix_fmt", "yuv420p",
+        str(out_path),
+    ]  # fmt: skip
+    _run(cmd)
+    return out_path
+
+
+def export_webp(
+    mp4_path: Path,
+    out_path: Path,
+    *,
+    fps: int = 24,
+    quality: int = 80,
+    max_width: int = 1280,
+) -> Path:
+    """Encode a crisp animated WebP (smaller and 24-bit color compared to GIF)."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    vf = f"fps={fps},scale='min({max_width},iw)':-2:flags=lanczos"
+    cmd = [
+        find_ffmpeg(), "-y", "-hide_banner", "-loglevel", "error",
+        "-i", str(mp4_path),
+        "-vf", vf,
+        "-c:v", "libwebp_anim", "-lossless", "0", "-compression_level", "4",
+        "-q:v", str(quality), "-loop", "0", "-preset", "picture",
+        str(out_path),
+    ]  # fmt: skip
+    _run(cmd)
     return out_path
 
 
@@ -170,11 +218,33 @@ def export_gif(
 
 
 def export_poster(frame: NDArray[np.uint8], path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
     ok, buf = cv2.imencode(".png", frame)
     if not ok:
         raise ExportError("could not encode poster PNG")
     buf.tofile(str(path))
     return path
+
+
+def export_screenshot_sheet(
+    shots: Sequence[tuple[int, str, NDArray[np.uint8]]],
+    sheet_path: Path,
+    theme: StudioTheme,
+    *,
+    save_individual: bool = True,
+) -> tuple[Path, list[Path]]:
+    """Write an annotated contact sheet PNG plus optional individual step PNGs for docs."""
+    sheet = build_screenshot_sheet(shots, theme)
+    export_poster(sheet, sheet_path)
+    saved: list[Path] = []
+    if save_individual:
+        shots_dir = sheet_path.with_name(f"{sheet_path.stem}")
+        shots_dir.mkdir(parents=True, exist_ok=True)
+        for step_num, _cap, frame in shots:
+            p = shots_dir / f"step-{step_num:02d}.png"
+            export_poster(frame, p)
+            saved.append(p)
+    return sheet_path, saved
 
 
 def probe(path: Path) -> str:

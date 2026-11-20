@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import difflib
 import json
 import os
@@ -32,9 +33,23 @@ from playwright.async_api import async_playwright
 from pydantic import BaseModel, Field, ValidationError
 
 from pullreel.human_runner import SCALE, VIEWPORT, find_locator, launch_chromium, wait_for_content
+from pullreel import net
 from pullreel.config import saved_key
 from pullreel.models import ActionStep, Camera, DiffSummary, Locator, Storyboard
 from pullreel.progress import ProgressEvent, Reporter, say, silent
+
+
+CUSTOM_REQUEST = """USER_SCENARIO (mandatory, written by the user): {request}
+The storyboard MUST perform exactly this journey on the page, from start to finish. Do not film another feature.
+- If it creates something (add / new / create / ajouter / nouveau / créer): click the button that opens the form or modal,
+  `show` the empty form, fill EVERY visible field with realistic, coherent demo data for this domain (a believable
+  FICTIONAL name - never a real celebrity -, a plausible number, a date, pick an option in each select / radio /
+  chip group). Target each field with strategy "label" and the text written above it (e.g. "Nom"), one fill per
+  field, each with a focus camera,
+  then click the submit button, then `show` the created item where it now appears (list, table, card): that is the
+  money shot, hold it ~2 s.
+- If it edits, filters or searches: same pattern, use -> show the result -> refine -> show again.
+- Never type credentials, emails other than name@example.com, or anything in a password field."""
 
 
 SYSTEM_PROMPT = """You are the Demo Director inside PullReel. You write the storyboard of a short screen recording whose only job is to SELL one feature of this branch: a reviewer (or a future user) watching it must think "I want this".
@@ -54,25 +69,29 @@ GOOD (what a director does): wait wide -> click "Elias" (focus) -> click "Brando
 The same pattern applies everywhere: filter -> show the filtered list -> refine the filter -> show again; add an item -> show it in the list -> add another -> show the updated totals; switch a mode -> show what changed.
 
 ### RULES
-1. ONE feature. Stay on its page: never click navigation (sidebar, menus, links or tabs that lead to another feature) unless that navigation IS the feature.
+1. ONE concrete user journey. Stay on the feature's page UNLESS the journey itself spans 2-3 pages (e.g., create an entity -> view its detail page -> return to the list); in that case set `"journey": true`. Never click unrelated navigation.
 2. Every click/fill must visibly change something, and that change must be shown right after with a `show` step (or a focus shot held >= 1200 ms that already contains it). A click with nothing shown after it is wasted.
 3. Zero hallucinated selectors: take targets from INTERACTIVE_ELEMENTS and RESULT_AREAS (and from OBSERVATIONS when provided), with semantic locators (role+name, label, placeholder, text, testid). An element that only appears after one of your own steps may be targeted by the exact name you were told it has.
 4. `show` = the camera frames a result area and the cursor points at it, without clicking. Give it a locator to a heading or a text inside the area (e.g. a column header): the camera automatically frames the whole container.
 5. Camera rhythm: `focus` (zoom 1.5-1.9) on the control about to be used; `show` with zoom 1.2-1.5 on results; `wide` to establish and to conclude. Vary the rhythm.
-6. Realistic data: short, domain-authentic text (2-4 words) when typing. Never credentials, never password fields, never destructive actions (delete, reset, sign out).
-7. `feature_summary` is a selling sentence about the outcome for the user, not a description of clicks.
+6. Realistic, safe data: generate believable, domain-coherent form values (names, numbers, dates, select choices) from labels/placeholders. Always use `@example.com` for emails. NEVER fill passwords, credit cards, secrets, or click destructive actions (delete, remove, reset, sign out). If the journey creates or modifies data, set `"mutates": true`.
+7. Add a crisp `"caption"` (3-8 words) on key interaction and payoff steps (null on wide waits) so viewers follow the story effortlessly.
+8. `feature_summary` is a selling sentence about the outcome for the user, not a description of clicks.
 
 ### STRICT JSON OUTPUT (no markdown, no commentary)
 {
   "feature_summary": "Compare any lineup in two clicks and see instantly which combination wins",
   "start_path": "/the-feature-page",
+  "journey": false,
+  "mutates": false,
   "steps": [
     {
       "action": "wait | click | fill | press | hover | scroll | show",
       "locator": {"strategy": "role | label | placeholder | text | testid | css", "value": "button", "name": "Exact accessible name if strategy is role, else null"},
       "input_value": "Text to type for fill, key name for press (e.g. Enter), or null",
       "camera": {"mode": "wide | focus | pan", "zoom": 1.75},
-      "dwell_after_ms": 1200
+      "dwell_after_ms": 1200,
+      "caption": "Short subtitle shown during this beat, or null"
     }
   ]
 }
@@ -123,6 +142,14 @@ _COLLECT_JS = r"""
     if (el.labels && el.labels.length) return text(el.labels[0].innerText);
     const lb = el.getAttribute('aria-labelledby');
     if (lb) return text(lb.split(/\s+/).map(id => document.getElementById(id)?.innerText || '').join(' '));
+    if (!['input','textarea','select'].includes(el.tagName.toLowerCase())) return '';
+    // unwired <label>/caption: the closest one before the field inside its small container
+    for (let box = el.parentElement, d = 0; box && d < 3; box = box.parentElement, d++) {
+      const cands = [...box.querySelectorAll('label, legend')].filter(
+        (l) => l.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING);
+      const own = cands.filter((l) => !l.control || l.control === el);
+      if (own.length) return text(own[own.length - 1].innerText).replace(/[*:]+$/, '').trim();
+    }
     return '';
   };
   // First chunk of text the user can actually see (skips tooltips/labels hidden with opacity, visibility or 0 size).
@@ -248,7 +275,14 @@ _LANDMARKS_JS = r"""
     }
     out.push(`chart${title ? ` "${title}"` : ''}`);
   }
-  return [...new Set(out)].slice(0, 40);
+  // list entries: a created item ("Lucas Moreau" in the roster) is the payoff of a creation journey
+  let items = 0;
+  for (const li of document.querySelectorAll('li,[role=listitem]')) {
+    if (items >= 30) break;
+    const s = t(li.innerText);
+    if (s && s.length <= 60 && vis(li)) { out.push(`item "${s}"`); items++; }
+  }
+  return [...new Set(out)].slice(0, 70);
 }
 """
 
@@ -343,7 +377,70 @@ def parse_model_spec(spec: str, *, base_url: str | None = None, api_key: str | N
         envs = " or ".join(prov.key_envs) or "PULLREEL_API_KEY"
         raise LLMError(f"{prov.name} needs an API key: set {envs} (or PULLREEL_API_KEY), or pass --api-key")
     return LLMConfig(model=model, base_url=url.rstrip("/"), api_key=key, ollama_native=prov.name == "ollama",
-                     provider=prov.name)  # fmt: skip
+                     provider=prov.name, timeout_s=600.0 if prov.local else 180.0)  # fmt: skip
+
+
+_NOT_CHAT = re.compile(r"(embed|tts|whisper|audio|image|imagen|dall|vision-only|moderation|transcri|realtime|veo|aqa|learnlm)", re.I)
+
+
+def list_models(provider: str, api_key: str | None, base_url: str | None = None) -> list[str]:
+    """Chat-capable model ids the provider says this key can use (empty list when it cannot tell)."""
+    prov = PROVIDERS[provider]
+    url = (base_url or prov.base_url).rstrip("/")
+    try:
+        if provider == "anthropic":
+            resp = net.get(f"{url}/models", timeout=15, headers={"x-api-key": api_key or "",
+                                                                  "anthropic-version": "2023-06-01"})  # fmt: skip
+        else:
+            headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+            resp = net.get(f"{url}/models", timeout=15, headers=headers)
+        if resp.status_code in (401, 403):
+            raise LLMError(f"{provider} rejected the API key (HTTP {resp.status_code})")
+        resp.raise_for_status()
+        data = resp.json().get("data", [])
+    except httpx.HTTPError as exc:
+        raise LLMError(f"cannot list {provider} models: {net.describe(exc)}") from exc
+    except ValueError:
+        return []
+    ids = []
+    for m in data:
+        mid = str(m.get("id", "")).removeprefix("models/")
+        if mid and not _NOT_CHAT.search(mid):
+            ids.append(mid)
+    return sorted(set(ids), key=lambda x: (x.count("-preview") + x.count("-exp"), x))
+
+
+TRANSIENT = (429, 500, 502, 503, 504, 529)  # overloaded / rate limited: worth retrying
+RETRY_DELAYS = (3.0, 8.0, 20.0)
+
+
+def api_error(resp: httpx.Response) -> str:
+    """The provider's own error sentence instead of a JSON dump."""
+    try:
+        data = resp.json()
+    except ValueError:
+        return resp.text.strip()[:300]
+    if isinstance(data, list) and data:
+        data = data[0]
+    err = data.get("error", data) if isinstance(data, dict) else data
+    if isinstance(err, dict):
+        return str(err.get("message") or err.get("status") or err)[:300]
+    return str(err)[:300]
+
+
+async def _post_with_retry(client: httpx.AsyncClient, url: str, body: dict[str, Any]) -> httpx.Response:
+    """POST, waiting and retrying when the provider is overloaded or rate-limiting (honours Retry-After)."""
+    resp = await client.post(url, json=body)
+    for delay in RETRY_DELAYS:
+        if resp.status_code not in TRANSIENT:
+            break
+        if resp.status_code == 429 and "quota" in resp.text.lower():
+            break  # out of quota: waiting will not help
+        retry_after = resp.headers.get("retry-after", "")
+        wait = float(retry_after) if retry_after.replace(".", "", 1).isdigit() else delay
+        await asyncio.sleep(min(wait, 60.0))
+        resp = await client.post(url, json=body)
+    return resp
 
 
 TokenFn = Callable[[int], None]  # called with the number of tokens generated so far
@@ -367,7 +464,7 @@ async def _ollama_chat(
         "options": {"temperature": cfg.temperature, "num_ctx": cfg.num_ctx},
     }
     parts: list[str] = []
-    async with httpx.AsyncClient(timeout=cfg.timeout_s) as client:
+    async with net.async_client(timeout=cfg.timeout_s) as client:
         try:
             for _try in range(2):
                 async with client.stream("POST", f"{root}/api/chat", json=body) as resp:
@@ -425,16 +522,16 @@ async def _anthropic_chat(
         "tool_choice": {"type": "tool", "name": schema_name},
     }  # fmt: skip
     headers = {"x-api-key": cfg.api_key or "", "anthropic-version": "2023-06-01", "content-type": "application/json"}
-    async with httpx.AsyncClient(timeout=cfg.timeout_s, headers=headers) as client:
+    async with net.async_client(timeout=cfg.timeout_s, headers=headers) as client:
         try:
-            resp = await client.post(f"{cfg.base_url}/messages", json=body)
+            resp = await _post_with_retry(client, f"{cfg.base_url}/messages", body)
         except httpx.ConnectError as exc:
-            raise LLMError(f"cannot reach {cfg.base_url}") from exc
+            raise LLMError(f"cannot reach {cfg.base_url}: {net.describe(exc)}") from exc
         except httpx.TimeoutException as exc:
             raise LLMError(f"{cfg.label} timed out after {cfg.timeout_s:.0f}s") from exc
     if resp.status_code >= 400:
         hint = " (check ANTHROPIC_API_KEY)" if resp.status_code in (401, 403) else ""
-        raise LLMError(f"{cfg.label} returned HTTP {resp.status_code}{hint}: {resp.text[:400]}")
+        raise LLMError(f"{cfg.label} returned HTTP {resp.status_code}{hint}: {api_error(resp)}")
     for block in resp.json().get("content", []):
         if block.get("type") == "tool_use":
             return json.dumps(block.get("input", {}))
@@ -460,14 +557,19 @@ async def chat_json(
         None,
     ]
     body: dict[str, Any] = {"model": cfg.model, "messages": messages, "temperature": cfg.temperature, "stream": False}
-    async with httpx.AsyncClient(timeout=cfg.timeout_s, headers=headers) as client:
+    if cfg.provider == "gemini":
+        body["reasoning_effort"] = "none"
+    async with net.async_client(timeout=cfg.timeout_s, headers=headers) as client:
         try:
             for fmt in formats:  # strictest structured output the endpoint accepts
                 if fmt is None:
                     body.pop("response_format", None)
                 else:
                     body["response_format"] = fmt
-                resp = await client.post(f"{cfg.base_url}/chat/completions", json=body)
+                resp = await _post_with_retry(client, f"{cfg.base_url}/chat/completions", body)
+                if resp.status_code == 400 and "reasoning" in resp.text and "reasoning_effort" in body:
+                    body.pop("reasoning_effort")
+                    resp = await _post_with_retry(client, f"{cfg.base_url}/chat/completions", body)
                 unsupported = resp.status_code in (400, 422) and (
                     "response_format" in resp.text or "json_schema" in resp.text
                 )
@@ -475,15 +577,17 @@ async def chat_json(
                     break
         except httpx.ConnectError as exc:
             hint = " Is the server running?" if "localhost" in cfg.base_url else ""
-            raise LLMError(f"cannot reach {cfg.base_url}.{hint}") from exc
+            raise LLMError(f"cannot reach {cfg.base_url}: {net.describe(exc)}.{hint}") from exc
         except httpx.TimeoutException as exc:
             raise LLMError(f"{cfg.label} timed out after {cfg.timeout_s:.0f}s") from exc
         if resp.status_code == 404 and "model" in resp.text.lower():
-            raise LLMError(f"model {cfg.model!r} not found at {cfg.base_url}{await _available_models(client, cfg)}")
+            raise LLMError(f"{cfg.label}: {api_error(resp)}")
         if resp.status_code in (401, 403):
             raise LLMError(f"{cfg.label} rejected the API key (HTTP {resp.status_code})")
         if resp.status_code >= 400:
-            raise LLMError(f"{cfg.label} returned HTTP {resp.status_code}: {resp.text[:400]}")
+            busy = " (provider overloaded - retried 3 times; try again later or pick another model)" \
+                if resp.status_code in TRANSIENT else ""
+            raise LLMError(f"{cfg.label} returned HTTP {resp.status_code}: {api_error(resp)}{busy}")
     try:
         content = resp.json()["choices"][0]["message"]["content"]
     except (KeyError, IndexError, ValueError) as exc:
@@ -491,6 +595,17 @@ async def chat_json(
     if not content:
         raise LLMError(f"{cfg.label} returned an empty message")
     return str(content)
+
+
+async def check_model(cfg: LLMConfig, timeout_s: float = 45.0) -> str | None:
+    """None if the model answers a tiny prompt; otherwise the reason (retired, quota, overloaded, bad key...)."""
+    probe = dataclasses.replace(cfg, timeout_s=timeout_s)
+    try:
+        await chat_json(probe, [{"role": "user", "content": 'Reply with {"ok": true}'}],
+                        schema={"type": "object", "properties": {"ok": {"type": "boolean"}}}, schema_name="ping")
+    except LLMError as exc:
+        return str(exc)
+    return None
 
 
 async def _available_models(client: httpx.AsyncClient, cfg: LLMConfig) -> str:
@@ -662,10 +777,17 @@ def normalize_raw(data: dict[str, Any]) -> dict[str, Any]:
             s["dwell_after_ms"] = int(min(10_000, max(0, float(s.get("dwell_after_ms", 450) or 0))))
         except (TypeError, ValueError):
             s["dwell_after_ms"] = 450
+        cap = s.get("caption")
+        if cap in ("", "null", None):
+            s["caption"] = None
+        else:
+            s["caption"] = str(cap).strip()[:120] or None
         fixed.append(s)
     data = dict(data)
     data["steps"] = fixed
     data.setdefault("feature_summary", "UI change demo")
+    data["journey"] = bool(data.get("journey", False))
+    data["mutates"] = bool(data.get("mutates", False))
     if not isinstance(data.get("start_path"), str) or not data["start_path"]:
         data["start_path"] = "/"
     return data
@@ -715,20 +837,34 @@ def polish(sb: Storyboard, *, max_seconds: float = 30.0) -> tuple[Storyboard, li
         for s in steps[1:-1]:
             s.dwell_after_ms = max(150, int(s.dwell_after_ms * ratio))
         notes.append(f"tightened dwell times: ~{total:.1f}s -> ~{sum(_estimate_s(s) for s in steps):.1f}s")
-    return Storyboard(feature_summary=sb.feature_summary, start_path=sb.start_path, steps=steps), notes
+    return Storyboard(
+        feature_summary=sb.feature_summary,
+        start_path=sb.start_path,
+        steps=steps,
+        journey=sb.journey,
+        mutates=sb.mutates,
+    ), notes
 
 
 # --------------------------------------------------------------------------------------------- grounding
-def fuzzy_match(loc: Locator, snapshot: PageSnapshot, *, cutoff: float = 0.6) -> InteractiveElement | None:
+EDITABLE_ROLES = {"textbox", "searchbox", "spinbutton", "combobox"}
+
+
+def fuzzy_match(loc: Locator, snapshot: PageSnapshot, *, cutoff: float = 0.6,
+                editable: bool = False) -> InteractiveElement | None:
     """Closest live element for a locator that matched nothing (wrong role, case, small wording drift...)."""
     wanted = (loc.name or loc.value) if loc.strategy == "role" else loc.value
     wanted_l = wanted.lower().strip()
     best: tuple[float, InteractiveElement] | None = None
     for el in snapshot.elements:
+        if editable and el.role not in EDITABLE_ROLES:
+            continue
         for key in el.keys():
             k = key.lower()
             score = difflib.SequenceMatcher(None, wanted_l, k).ratio()
-            if wanted_l and (wanted_l in k or k in wanted_l):
+            if len(k) < 3 and k != wanted_l:
+                continue  # initials, badges, single letters: never a credible repair
+            if wanted_l and (wanted_l in k or (k in wanted_l and len(k) * 2 >= len(wanted_l))):
                 score = max(score, 0.85)
             if loc.strategy == "role" and el.role == loc.value:
                 score += 0.05
@@ -746,6 +882,7 @@ class RehearsalResult:
     snapshot_at_failure: PageSnapshot | None = None
     observations: list[str] = field(default_factory=list)  # what each step changed on screen
     left_page_at: int | None = None  # first step that navigated away from the feature page
+    created: str | None = None  # text of the item a submit created ("Lucas Moreau" in the list)
 
 
 def left_feature(start_path: str, now_path: str) -> bool:
@@ -769,32 +906,125 @@ async def _screen_signature(page: Page) -> set[str]:
     return sig
 
 
+# After a submit: where do the values the story typed now show up, outside the form? (the created item)
+_CREATED_JS = r"""
+(values) => {
+  const t = (s) => (s || '').replace(/\s+/g, ' ').trim();
+  const inForm = (e) => e.closest('input,textarea,select,form,[role=dialog],[aria-modal=true]');
+  const vis = (e) => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  const all = values.filter(Boolean);
+  let best = null;  // the tightest text that names the item ("Lucas Moreau", not the whole list around it)
+  for (const leaf of document.body.querySelectorAll('*')) {
+    if (leaf.children.length > 2 || inForm(leaf) || !vis(leaf)) continue;
+    const own = t(leaf.innerText);
+    if (!own || own.length > 60 || !own.includes(all[0]) || (best && own.length >= best.length)) continue;
+    let box = leaf;
+    for (let d = 0; d < 4 && box; d++, box = box.parentElement) {
+      const txt = box.innerText || '';
+      if (all.every((v) => txt.includes(v))) { best = own; break; }
+    }
+  }
+  return best;
+}
+"""
+
+SUBMIT_WORDS = ("ajout", "add", "save", "enregistr", "créer", "creer", "create", "valider", "submit", "confirm",
+                "envoyer", "send", "publier", "publish", "ok")
+
+
+async def _created_item(page: Page, typed: list[str], timeout_s: float = 6.0) -> str | None:
+    """Text of the element that now shows what was typed (e.g. the new player's name in the roster)."""
+    values = [v for v in typed if len(v) >= 3 and not v.replace(".", "").isdigit()][:3]
+    if not values:
+        return None
+    deadline = time.monotonic() + timeout_s
+    while True:
+        with contextlib.suppress(PlaywrightError):
+            found = await page.evaluate(_CREATED_JS, values)
+            if found:
+                return str(found)
+        if time.monotonic() > deadline:
+            return None
+        await page.wait_for_timeout(400)
+
+
+def with_money_shot(sb: Storyboard, created: str | None) -> tuple[Storyboard, list[str]]:
+    """A creation story ends on the created item: retarget (or add) the last `show` after the submit onto it."""
+    if not created:
+        return sb, []
+    steps = [s.model_copy(deep=True) for s in sb.steps]
+    if any(s.action == "show" and s.locator and created in (s.locator.name or s.locator.value) for s in steps):
+        return sb, []
+    last_click = max((i for i, s in enumerate(steps) if s.action == "click"), default=-1)
+    shot = Locator(strategy="text", value=created)
+    later_shows = [i for i, s in enumerate(steps) if s.action == "show" and i > last_click]
+    if later_shows:
+        steps[later_shows[-1]].locator = shot
+        steps[later_shows[-1]].dwell_after_ms = max(steps[later_shows[-1]].dwell_after_ms, 2000)
+    else:
+        at = len(steps) - 1 if steps and steps[-1].action == "wait" else len(steps)
+        steps.insert(at, ActionStep(action="show", locator=shot, camera=Camera(mode="focus", zoom=1.4),
+                                    dwell_after_ms=2000))  # fmt: skip
+    note = f"money shot: the created item {created!r}"
+    return Storyboard(feature_summary=sb.feature_summary, start_path=sb.start_path, steps=steps), [note]
+
+
 async def rehearse(
-    browser: Browser, url: str, sb: Storyboard, report: Reporter = silent, auth: Path | None = None
+    browser: Browser,
+    url: str,
+    sb: Storyboard,
+    report: Reporter = silent,
+    auth: Path | None = None,
+    *,
+    dry_rehearsal: bool = False,
+    extra_blocklist: tuple[str, ...] | list[str] = (),
 ) -> RehearsalResult:
-    """Play the storyboard fast; repair locators against the live page; stop at the first unfixable step."""
+    """Play the storyboard fast; repair locators against the live page; stop at the first unfixable step.
+
+    Supports multi-page journeys (``sb.journey=True``, up to 3 pages), extended destructive-action blocking,
+    and ``dry_rehearsal=True`` (verifies final form submit buttons without clicking them).
+    """
+    from pullreel.journeys import _SUBMIT_RE, detect_mutating_storyboard, is_destructive, is_sensitive_field
+
     context = await browser.new_context(
         viewport={"width": VIEWPORT[0], "height": VIEWPORT[1]},
         device_scale_factor=1,
         color_scheme="dark",
         storage_state=str(auth) if auth else None,
     )
+    await context.add_init_script(_INVALID_WATCH)
     steps = [s.model_copy(deep=True) for s in sb.steps]
     result = RehearsalResult(storyboard=sb)
+    visited_paths: list[str] = [urlparse(url).path or "/"]
+    filled_form = False
+    skipped_submit = False
     try:
         page = await context.new_page()
         await page.goto(url, wait_until="load")
         await wait_for_content(page)
+        typed: list[str] = []
         for i, step in enumerate(steps):
             what = f"{step.action} {step.locator.describe()}" if step.locator else step.action
             say(report, "rehearsal", detail=f"step {i + 1}/{len(steps)} · {what}", completed=i, total=len(steps))
+            if skipped_submit and step.action == "show":
+                # Post-submit show step cannot find an unsubmitted item during dry rehearsal.
+                result.observations.append(f"step {i} {what}: dry-rehearsal skipped post-submit check")
+                continue
             if step.locator is not None:
+                loc_text = step.locator.name or step.locator.value
+                if step.action == "click" and is_destructive(loc_text, extra_blocklist):
+                    result.error = (
+                        f"step {i} clicks a destructive/blocked control ({step.locator.describe()}): "
+                        "PullReel never clicks delete/reset/logout actions"
+                    )
+                    result.failed_step, result.snapshot_at_failure = i, await capture_snapshot(page)
+                    break
                 target = await find_locator(page, step.locator)
                 try:
                     await target.wait_for(state="visible", timeout=2500)
                 except PlaywrightError:
                     snap = await capture_snapshot(page)
-                    match = fuzzy_match(step.locator, snap)
+                    match = fuzzy_match(step.locator, snap, editable=step.action == "fill")
                     if match is None:
                         result.error = f"step {i} ({step.action}): no visible element for {step.locator.describe()}"
                         result.failed_step, result.snapshot_at_failure = i, snap
@@ -811,16 +1041,51 @@ async def rehearse(
                         result.failed_step, result.snapshot_at_failure = i, snap
                         break
             if step.action == "fill" and step.locator is not None:
-                kind = None
+                kind, fname = "", ""
                 with contextlib.suppress(PlaywrightError):
-                    kind = await (await find_locator(page, step.locator)).get_attribute("type", timeout=1000)
-                if (kind or "").lower() == "password":
-                    result.error = (f"step {i} types into a password field ({step.locator.describe()}): "
-                                    "never fill credentials, show the feature itself")
+                    el = await find_locator(page, step.locator)
+                    kind = (await el.get_attribute("type", timeout=1000)) or ""
+                    fname = (await el.get_attribute("name", timeout=1000)) or ""
+                if is_sensitive_field(step.locator.name or step.locator.value, fname, "", kind):
+                    result.error = (f"step {i} types into a sensitive/password field ({step.locator.describe()}): "
+                                    "never fill credentials or payment details, show the feature itself")
+                    result.failed_step, result.snapshot_at_failure = i, await capture_snapshot(page)
+                    break
+                filled_form = True
+            has_later_fill = any(s.action == "fill" for s in steps[i + 1 :])
+            if (
+                dry_rehearsal
+                and step.action == "click"
+                and step.locator is not None
+                and filled_form
+                and not has_later_fill
+                and _SUBMIT_RE.search(step.locator.name or step.locator.value)
+            ):
+                # Dry rehearsal: verify submit target exists & is enabled, without mutating app state.
+                el = await find_locator(page, step.locator)
+                if await el.is_disabled(timeout=1500):
+                    result.error = f"step {i} ({step.action}): submit control {step.locator.describe()} is disabled"
+                    result.failed_step, result.snapshot_at_failure = i, await capture_snapshot(page)
+                    break
+                skipped_submit = True
+                result.observations.append(f"step {i} {what}: dry-rehearsal verified submit (not clicked)")
+                continue
+            if step.action == "fill" and step.locator is not None:
+                owner = None
+                with contextlib.suppress(PlaywrightError):
+                    owner = await (await find_locator(page, step.locator)).evaluate(
+                        "(e, i) => { const o = e.dataset.pullreelFilled; e.dataset.pullreelFilled = i; return o ?? null; }",
+                        str(i))  # fmt: skip
+                if owner is not None and owner != str(i):
+                    result.error = (f"steps {owner} and {i} type into the SAME field ({step.locator.describe()}): "
+                                    "the second erases the first. Target each field by its own label "
+                                    "(strategy 'label' with the text written above the field)")
                     result.failed_step, result.snapshot_at_failure = i, await capture_snapshot(page)
                     break
             before = await _screen_signature(page) if step.action in ("click", "fill", "press") else None
             path_before = urlparse(page.url).path
+            if step.action == "fill" and step.input_value:
+                typed.append(step.input_value)
             try:
                 await _quick_action(page, step)
             except PlaywrightError as exc:
@@ -833,20 +1098,67 @@ async def rehearse(
                 after = await _screen_signature(page)
                 path_after = urlparse(page.url).path
                 line = f"step {i} {what}: "
-                if path_after != path_before and left_feature(urlparse(url).path, path_after):
-                    line += f"LEFT THE FEATURE PAGE ({path_before} -> {path_after}). "
-                    if result.left_page_at is None:
-                        result.left_page_at = i
+                if path_after != path_before:
+                    if path_after not in visited_paths:
+                        visited_paths.append(path_after)
+                    if sb.journey and len(visited_paths) <= 4:
+                        line += f"navigated: {path_before} -> {path_after}. "
+                    elif left_feature(urlparse(url).path, path_after):
+                        line += f"LEFT THE FEATURE PAGE ({path_before} -> {path_after}). "
+                        if result.left_page_at is None:
+                            result.left_page_at = i
+                invalid = await _invalid_fields(page) if step.action == "click" else []
+                if invalid:
+                    result.error = (f"step {i} ({what}) submitted a form that is still invalid - "
+                                    + "; ".join(invalid) + ". Fill those fields (by label) before submitting")
+                    result.failed_step, result.snapshot_at_failure = i, await capture_snapshot(page)
+                    break
                 appeared = sorted(after - before, key=lambda x: (not x.startswith(("table", "chart", "heading")), x))
                 gone = before - after
+                label = ((step.locator.name or step.locator.value) if step.locator else "").lower()
+                if step.action == "click" and typed and result.created is None \
+                        and any(w in label for w in SUBMIT_WORDS):
+                    result.created = await _created_item(page, typed)
+                    if result.created:
+                        appeared.insert(0, f"CREATED ITEM: text {result.created!r} (show it: the money shot)")
                 line += ("appeared: " + "; ".join(appeared[:12])) if appeared else "nothing new appeared"
                 if gone:
                     line += f" ({len(gone)} things disappeared)"
                 result.observations.append(line)
-        result.storyboard = Storyboard(feature_summary=sb.feature_summary, start_path=sb.start_path, steps=steps)
+        final_sb = Storyboard(
+            feature_summary=sb.feature_summary,
+            start_path=sb.start_path,
+            steps=steps,
+            journey=sb.journey or len(visited_paths) > 1,
+            mutates=sb.mutates,
+        )
+        final_sb.mutates = detect_mutating_storyboard(final_sb)
+        result.storyboard = final_sb
     finally:
         await context.close()
     return result
+
+
+# Browsers fire `invalid` on each bad field when a submit is attempted (and block it): record them.
+_INVALID_WATCH = r"""
+window.__pullreelInvalid = [];
+document.addEventListener('invalid', (ev) => {
+  const e = ev.target;
+  const lab = (e.labels && e.labels[0]) || e.closest('div')?.querySelector('label');
+  const name = (e.getAttribute('aria-label') || lab?.innerText || e.placeholder || e.name || 'field')
+    .replace(/\s+/g, ' ').replace(/[*:]+\s*$/, '').trim();
+  window.__pullreelInvalid.push(`field "${name}": ${e.validationMessage}`);
+}, true);
+"""
+
+
+async def _invalid_fields(page: Page) -> list[str]:
+    """Fields the browser refused when the last click tried to submit their form (then forget them)."""
+    try:
+        found = await page.evaluate("() => { const f = window.__pullreelInvalid || []; window.__pullreelInvalid = []; return f; }")
+    except PlaywrightError:
+        return []
+    return list(dict.fromkeys(found))[:5]
 
 
 async def _quick_action(page: Page, step: ActionStep) -> None:
@@ -857,8 +1169,14 @@ async def _quick_action(page: Page, step: ActionStep) -> None:
             await target.click(timeout=3000)
         case "fill":
             assert target is not None and step.input_value is not None
-            await target.click(timeout=3000)
-            await target.fill(step.input_value, timeout=3000)
+            tag = ""
+            with contextlib.suppress(PlaywrightError):
+                tag = str(await target.evaluate("e => e.tagName.toLowerCase()"))
+            if tag == "select":
+                await target.select_option(label=step.input_value, timeout=3000)
+            else:
+                await target.click(timeout=3000)
+                await target.fill(step.input_value, timeout=3000)
         case "hover":
             assert target is not None
             await target.hover(timeout=3000)
@@ -884,6 +1202,9 @@ class PlanResult:
     notes: list[str] = field(default_factory=list)
     attempts: int = 1
     raw_replies: list[str] = field(default_factory=list)
+    ai_down: str | None = None  # the model could not be reached (connection, key...): later scenarios skip it
+    chapter: str | None = None  # sub-feature of the page this storyboard shows ("main view", a tab...)
+    extras: list[tuple[str, Storyboard]] = field(default_factory=list)  # other strong chapters of the page
 
 
 def _static_route(route: str) -> bool:
@@ -909,8 +1230,13 @@ class ScoutPick(BaseModel):
     why: str = ""
     labels: list[str] = Field(default_factory=list)
     recommended: bool = True  # chosen by the scout model (False = topped up from the scored candidates)
+    sales_score: float | None = None  # 0..100 estimated demo sales value
+    mutates: bool = False  # True if the scenario creates/modifies data
+    user_requested: bool = False  # True for --focus or "Write my own scenario..." (never replaced by composer)
 
     def to_prompt(self) -> str:
+        if self.user_requested:
+            return CUSTOM_REQUEST.format(request=self.title)
         lines = [f"FEATURE_TO_SHOW: {self.title}"]
         if self.why:
             lines.append(f"WHY IT MATTERS: {self.why}")
@@ -925,9 +1251,17 @@ class ScoutResult(BaseModel):
 
 
 def _pick_from_candidate(diff: DiffSummary, index: int = 0) -> ScoutPick:
+    from pullreel.journeys import score_candidate_sales
+
     f = diff.features[index]
     why = f.commits[0] if f.commits else f"{f.added} lines changed"
-    return ScoutPick(title=f.title, route=f.route, why=why, labels=f.labels[:5])
+    return ScoutPick(
+        title=f.title,
+        route=f.route,
+        why=why,
+        labels=f.labels[:5],
+        sales_score=score_candidate_sales(candidate=f, title=f.title),
+    )
 
 
 def match_focus(diff: DiffSummary, focus: str) -> ScoutPick:
@@ -942,7 +1276,7 @@ def match_focus(diff: DiffSummary, focus: str) -> ScoutPick:
         if best is None or score > best[0]:
             best = (score, i)
     route = diff.features[best[1]].route if best and best[0] >= 0.5 else None
-    return ScoutPick(title=focus, route=route, why="requested with --focus", labels=[])
+    return ScoutPick(title=focus, route=route, why="requested with --focus", labels=[], user_requested=True)
 
 
 async def scout_features(diff: DiffSummary, cfg: LLMConfig, n: int, report: Reporter = silent) -> list[ScoutPick]:
@@ -969,12 +1303,16 @@ async def scout_features(diff: DiffSummary, cfg: LLMConfig, n: int, report: Repo
     ]
     known = {f.route for f in diff.features if f.route}
     picks: list[ScoutPick] = []
-    with contextlib.suppress(ValueError, ValidationError, LLMError):
+    try:
         def on_tokens(k: int) -> None:
             say(report, "scout", detail=f"{cfg.model} · writing · {k} tokens")
 
         reply = await chat_json(cfg, messages, on_tokens, ScoutResult.model_json_schema(), "feature_picks")
         picks = ScoutResult.model_validate(extract_json(reply)).features
+    except LLMError as exc:
+        say(report, "scout", detail=f"AI unavailable ({exc}) - using the scored candidates")
+    except (ValueError, ValidationError):
+        say(report, "scout", detail="unusable AI answer - using the scored candidates")
     cleaned: list[ScoutPick] = []
     seen: set[str] = set()
     for p in picks:
@@ -1022,7 +1360,17 @@ async def plan_storyboard(
     feature: ScoutPick | None = None,
     refine: bool = True,
     director: str = "auto",
+    chapters_per_page: int = 3,
+    dry_rehearsal: bool = False,
+    extra_blocklist: tuple[str, ...] | list[str] = (),
 ) -> PlanResult:
+    user_requested = bool(feature is not None and feature.user_requested)
+    if user_requested and director == "composer":
+        raise PlanError(
+            f"Cannot film custom scenario {feature.title!r} with --director composer: "  # type: ignore[union-attr]
+            "custom requests (--focus / 'Write my own') require an AI director so PullReel follows your exact intent. "
+            "Use --director ai or --director auto with a reachable model."
+        )
     say(report, "snapshot", "start", "launching Chromium")
     async with async_playwright() as pw:
         browser = await launch_chromium(pw, headed=headed, progress=lambda m: say(report, "snapshot", detail=m))
@@ -1115,11 +1463,16 @@ async def plan_storyboard(
                     sb, polish_notes = polish(sb)
                     notes.extend(polish_notes)
                     say(report, "rehearsal", "start", "replaying at full speed", 0, len(sb.steps))
-                    rehearsal = await rehearse(browser, start_url, sb, report, auth)
+                    rehearsal = await rehearse(
+                        browser, start_url, sb, report, auth,
+                        dry_rehearsal=dry_rehearsal, extra_blocklist=extra_blocklist,
+                    )
                     notes.extend(f"repaired {r}" for r in rehearsal.repairs)
                     if rehearsal.error is None:
                         fixed = f" · {len(rehearsal.repairs)} locator(s) repaired" if rehearsal.repairs else ""
                         final, _ = polish(rehearsal.storyboard)
+                        final, shot_notes = with_money_shot(final, rehearsal.created)
+                        notes.extend(shot_notes)
                         if refine and draft is None and attempt < max_attempts and rehearsal.observations:
                             # Draft works: now let the model see what its clicks produced, and direct for real.
                             draft, draft_obs = final, list(rehearsal.observations)
@@ -1150,37 +1503,98 @@ async def plan_storyboard(
                     return draft, draft_obs, max_attempts
                 raise PlanError(f"no valid storyboard after {max_attempts} attempts; last error: {last_error}")
 
-            from pullreel.composer import GOOD_STORY, compose_story, explore_feature, story_quality
+            from pullreel.composer import GOOD_STORY, compose_chapter, explore_page, story_quality
+            from pullreel.journeys import detect_mutating_storyboard, explore_journeys
 
+            main_title: str | None = None
             best: tuple[Storyboard, float, int] | None = None
             ai_error: PlanError | None = None
+            ai_down: str | None = None
             if director != "composer":
                 try:
                     sb_ai, obs_ai, attempts = await ai_plan()
                     best = (sb_ai, story_quality(sb_ai, obs_ai), attempts)
                 except PlanError as exc:
                     ai_error = exc
-            if director != "ai" and (best is None or best[1] < GOOD_STORY):
-                why = "no AI story" if best is None else f"AI story is thin (score {best[1]:.0f})"
-                say(report, "rehearsal", "start", f"{why} -> exploring the feature to compose one")
-                exploration = await explore_feature(browser, start_url, auth=auth)
-                if exploration is not None:
-                    summary = (feature.why or feature.title) if feature is not None else "See the feature in action"
-                    composed, _ = polish(compose_story(exploration, summary, snapshot_path))
-                    trial = await rehearse(browser, start_url, composed, report, auth)
-                    if trial.error is None:
-                        q = story_quality(trial.storyboard, trial.observations)
-                        if best is None or q > best[1]:
-                            group = ", ".join(m.name for m in exploration.group[:4])
-                            notes.append(f"auto-composed story (score {q:.0f}) from the controls: {group}")
-                            best = (polish(trial.storyboard)[0], q, best[2] if best else 0)
-                    else:
-                        notes.append(f"composed story failed rehearsal: {trial.error}")
+                    if user_requested:
+                        raise PlanError(
+                            f"Could not build the requested scenario {feature.title!r}: {exc} "  # type: ignore[union-attr]
+                            "(PullReel will not replace your custom scenario with an unrelated auto-composed demo)."
+                        ) from exc
+                except LLMError as exc:
+                    if director == "ai" or user_requested:
+                        if user_requested:
+                            raise PlanError(
+                                f"AI failed while planning your custom scenario {feature.title!r}: {exc} "  # type: ignore[union-attr]
+                                "(PullReel will not substitute an unrelated demo)."
+                            ) from exc
+                        raise
+                    ai_error = PlanError(str(exc))
+                    ai_down = str(exc)
+                    notes.append(f"AI unavailable ({exc}) - story composed automatically")
+                    say(report, "storyboard", "fail", f"AI unavailable: {exc}")
+
+            extras: list[tuple[str, Storyboard, float]] = []
+            # Never override or augment a custom user-requested scenario with automatic composer discoveries.
+            if director != "ai" and not user_requested:
+                say(report, "rehearsal", "start", "discovering concrete user journeys and interactive chapters...")
+                composed: list[tuple[str, Storyboard, float]] = []
+                # 1. Concrete workflows (create forms, search/filter, etc.)
+                journeys = await explore_journeys(
+                    browser, start_url, auth=auth, dry_rehearsal=dry_rehearsal,
+                    diff=diff, extra_blocklist=extra_blocklist,
+                )
+                for jp in journeys:
+                    sb_j, _ = polish(jp.storyboard)
+                    trial = await rehearse(
+                        browser, start_url, sb_j, report, auth,
+                        dry_rehearsal=dry_rehearsal, extra_blocklist=extra_blocklist,
+                    )
+                    if trial.error is not None:
+                        notes.append(f"journey {jp.workflow.title!r} failed rehearsal: {trial.error}")
+                        continue
+                    q = story_quality(trial.storyboard, trial.observations) + 2.5
+                    composed.append((jp.workflow.title, polish(trial.storyboard)[0], q))
+
+                # 2. Control-group chapters
+                chapters = await explore_page(
+                    browser, start_url, auth=auth, max_chapters=max(chapters_per_page, 1) + 1,
+                    extra_blocklist=extra_blocklist,
+                )
+                summary = (feature.why or feature.title) if feature is not None else "See the feature in action"
+                for chapter in chapters:
+                    sb_c, _ = polish(compose_chapter(chapter, summary, snapshot_path))
+                    say(report, "rehearsal", "start", f"chapter {chapter.title!r}: rehearsing", 0, len(sb_c.steps))
+                    trial = await rehearse(
+                        browser, start_url, sb_c, report, auth,
+                        dry_rehearsal=dry_rehearsal, extra_blocklist=extra_blocklist,
+                    )
+                    if trial.error is not None:
+                        notes.append(f"chapter {chapter.title!r} failed rehearsal: {trial.error}")
+                        continue
+                    q = story_quality(trial.storyboard, trial.observations)
+                    composed.append((chapter.title, polish(trial.storyboard)[0], q))
+
+                composed.sort(key=lambda c: -c[2])
+                for title, _sb_c, q in composed:
+                    notes.append(f"chapter {title!r}: auto-composed story, score {q:.0f}")
+                if composed and (best is None or best[1] < GOOD_STORY):
+                    title, sb_c, q = composed.pop(0)
+                    if best is None or q > best[1]:
+                        best = (sb_c, q, best[2] if best else 0)
+                        main_title = title
+                # the page's other strong chapters become their own scenarios ("Coaching > Situations de match")
+                extras = [c for c in composed if c[2] >= GOOD_STORY * 0.8][: max(chapters_per_page - 1, 0)]
             if best is None:
                 raise ai_error or PlanError("no story could be built for this feature")
             final_sb, score, attempts = best
-            say(report, "rehearsal", "done", f"story ready · {len(final_sb.steps)} steps · score {score:.0f}")
-            return PlanResult(final_sb, start_url, snapshot, notes, attempts, replies)
+            final_sb.mutates = detect_mutating_storyboard(final_sb)
+            more = f" + {len(extras)} more chapter(s)" if extras else ""
+            say(report, "rehearsal", "done", f"story ready · {len(final_sb.steps)} steps · score {score:.0f}{more}")
+            res = PlanResult(final_sb, start_url, snapshot, notes, attempts, replies, ai_down=ai_down)
+            res.chapter = main_title
+            res.extras = [(title, sb_c) for title, sb_c, _q in extras]
+            return res
         finally:
             await browser.close()
 
@@ -1206,6 +1620,9 @@ async def plan_storyboards(
     picks: list[ScoutPick] | None = None,
     refine: bool = True,
     director: str = "auto",
+    chapters_per_page: int = 3,
+    dry_rehearsal: bool = False,
+    extra_blocklist: tuple[str, ...] | list[str] = (),
 ) -> list[tuple[ScoutPick, PlanResult]]:
     """Scout the branch, then plan one grounded storyboard per chosen feature (on that feature's own page).
 
@@ -1229,14 +1646,29 @@ async def plan_storyboards(
                                  ev.completed, ev.total))  # fmt: skip
 
         try:
-            res = await plan_storyboard(url, diff, cfg, max_attempts=max_attempts, headed=headed, report=scoped,
-                                        auth=auth, feature=pick, refine=refine, director=director)  # fmt: skip
+            res = await plan_storyboard(
+                url, diff, cfg, max_attempts=max_attempts, headed=headed, report=scoped,
+                auth=auth, feature=pick, refine=refine, director=director,
+                chapters_per_page=chapters_per_page, dry_rehearsal=dry_rehearsal,
+                extra_blocklist=extra_blocklist,
+            )
+            if res.ai_down and director == "auto" and not pick.user_requested:
+                director = "composer"  # don't wait on a dead endpoint for every non-custom scenario
         except LoginRequiredError:
             raise  # same wall for every scenario
         except PlanError as exc:
             errors.append(f"{pick.title}: {exc}")
             continue
-        results.append((pick, res))
+        main = pick.model_copy()
+        main.mutates = res.storyboard.mutates
+        if res.chapter and res.chapter != "main view":
+            main.title = f"{pick.title} > {res.chapter}"
+        results.append((main, res))
+        for title, sb_extra in res.extras:  # deeper chapters of the same page, each its own video
+            sub = pick.model_copy()
+            sub.title = f"{pick.title} > {title}"
+            sub.mutates = sb_extra.mutates
+            results.append((sub, PlanResult(sb_extra, res.url, res.snapshot, [], res.attempts, [])))
     if not results:
         raise PlanError("no scenario could be planned: " + " | ".join(errors))
     for e in errors:
@@ -1257,10 +1689,16 @@ def plan_storyboards_sync(
     picks: list[ScoutPick] | None = None,
     refine: bool = True,
     director: str = "auto",
+    chapters_per_page: int = 3,
+    dry_rehearsal: bool = False,
+    extra_blocklist: tuple[str, ...] | list[str] = (),
 ) -> list[tuple[ScoutPick, PlanResult]]:
-    return asyncio.run(plan_storyboards(url, diff, cfg, scenarios=scenarios, focus=focus, headed=headed,
-                                        report=report, auth=auth, picks=picks, refine=refine,
-                                        director=director))  # fmt: skip
+    return asyncio.run(plan_storyboards(
+        url, diff, cfg, scenarios=scenarios, focus=focus, headed=headed,
+        report=report, auth=auth, picks=picks, refine=refine,
+        director=director, chapters_per_page=chapters_per_page,
+        dry_rehearsal=dry_rehearsal, extra_blocklist=extra_blocklist,
+    ))
 
 
 def plan_storyboard_sync(
