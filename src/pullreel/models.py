@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 LocatorStrategy = Literal["role", "label", "placeholder", "text", "testid", "css"]
 CameraMode = Literal["wide", "focus", "pan"]
-ActionType = Literal["wait", "click", "fill", "press", "hover", "scroll"]
+ActionType = Literal["wait", "click", "fill", "press", "hover", "scroll", "show"]
 
 Box = tuple[float, float, float, float]  # x, y, width, height in CSS pixels
 
@@ -55,10 +55,12 @@ class ActionStep(BaseModel):
     input_value: str | None = None
     camera: Camera = Field(default_factory=Camera)
     dwell_after_ms: int = Field(default=450, ge=0, le=10_000)
+    # "show" = camera + cursor point at a result area (table, chart, stat) without clicking; the camera frames
+    # the area's container, so a heading or a text inside it is enough as locator.
 
     @model_validator(mode="after")
     def _check_requirements(self) -> Self:
-        if self.action in ("click", "fill", "hover") and self.locator is None:
+        if self.action in ("click", "fill", "hover", "show") and self.locator is None:
             raise ValueError(f"action {self.action!r} requires a locator")
         if self.action in ("fill", "press") and not self.input_value:
             raise ValueError(f"action {self.action!r} requires input_value")
@@ -134,11 +136,27 @@ class ChangedFile(BaseModel):
     removed: int = 0
 
 
+class FeatureCandidate(BaseModel):
+    """A user-visible change, grouped by the page it lives on (produced by ``diff_analyzer``)."""
+
+    title: str  # human name: page/component, e.g. "AdversairesPage" or "Global search"
+    route: str | None = None  # URL path where it can be seen ("/adversaires"); None for shared components
+    files: list[str] = Field(default_factory=list)  # changed files that belong to it, most changed first
+    added: int = 0  # added lines across those files
+    new_files: int = 0  # how many of them are brand new
+    labels: list[str] = Field(default_factory=list)  # user-facing strings added in those files (max 12)
+    commits: list[str] = Field(default_factory=list)  # subjects of commits that touched those files (max 6)
+    score: float = 0.0  # higher = more worth demoing
+
+
 class DiffSummary(BaseModel):
     """Compact, LLM-ready digest of a branch's UI changes (produced by ``diff_analyzer``)."""
 
     base_ref: str
     head_ref: str
+    project: str = ""  # what the app is: package.json name/description + start of the README
+    commits: list[str] = Field(default_factory=list)  # commit subjects base..HEAD, newest first (max 30)
+    features: list[FeatureCandidate] = Field(default_factory=list)  # best first (max 8)
     files: list[ChangedFile] = Field(default_factory=list)
     components: list[str] = Field(default_factory=list)  # component / function names introduced or touched
     labels: list[str] = Field(default_factory=list)  # user-facing strings: button text, aria-label, placeholder...
@@ -151,13 +169,35 @@ class DiffSummary(BaseModel):
     def ui_files(self) -> list[ChangedFile]:
         return [f for f in self.files if f.is_ui or f.is_route]
 
+    @staticmethod
+    def feature_line(f: FeatureCandidate) -> str:
+        where = f"route={f.route}" if f.route else "no route (shared component)"
+        bits = [f"{f.title} · {where} · +{f.added} lines"]
+        if f.new_files:
+            bits.append(f"{f.new_files} new file(s)")
+        line = " · ".join(bits)
+        if f.labels:
+            line += " · labels: " + ", ".join(repr(x) for x in f.labels[:8])
+        if f.commits:
+            line += " · commits: " + " | ".join(f.commits[:3])
+        return line
+
     @property
     def is_empty(self) -> bool:
         return not self.files
 
     def to_prompt(self, max_chars: int = 6000) -> str:
         """Render the ``GIT_DIFF_SUMMARY`` block sent to the storyboard LLM, capped at ``max_chars``."""
-        lines = [f"Base: {self.base_ref} -> Head: {self.head_ref}", "Changed UI files:"]
+        lines = [f"Base: {self.base_ref} -> Head: {self.head_ref}"]
+        if self.project:
+            lines.append(f"Project: {self.project[:500]}")
+        if self.commits:
+            lines.append("Commits (newest first):")
+            lines += [f"  - {c}" for c in self.commits[:15]]
+        if self.features:
+            lines.append("Feature candidates (best first):")
+            lines += [f"  {i}. {self.feature_line(f)}" for i, f in enumerate(self.features[:8], 1)]
+        lines.append("Changed UI files:")
         for f in self.ui_files[:25] or self.files[:15]:
             tag = " [route]" if f.is_route else ""
             lines.append(f"  {f.status:<8} {f.path} (+{f.added}/-{f.removed}){tag}")
@@ -193,7 +233,7 @@ class StudioTheme(BaseModel):
     click_press_scale: float = 0.88
     output_fps: int = 60
     gif_fps: int = 30
-    gif_max_mb: float = 5.0
+    gif_max_mb: float = 9.5  # GitHub accepts GIFs up to 10 MB in PR comments
     crf: int = 18
 
 

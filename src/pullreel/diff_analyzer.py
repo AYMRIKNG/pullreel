@@ -9,17 +9,21 @@ into a ``DiffSummary`` ready for the storyboard LLM.
 
 from __future__ import annotations
 
+import json
+import math
 import re
 import subprocess
-from collections.abc import Iterable, Sequence
+import tomllib
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from pathlib import Path, PurePosixPath
 
-from pullreel.models import ChangedFile, DiffSummary, FileStatus
+from pullreel.models import ChangedFile, DiffSummary, FeatureCandidate, FileStatus
 
 __all__ = [
     "GitError",
     "analyze_diff",
     "build_excerpt",
+    "build_feature_candidates",
     "extract_from_added_lines",
     "extract_routes_from_lines",
     "extract_routes_from_path",
@@ -27,14 +31,24 @@ __all__ = [
     "is_ignored_path",
     "is_ui_file",
     "parse_added_lines_by_file",
+    "parse_import_specifiers",
     "parse_name_status",
     "parse_numstat",
+    "read_project_context",
+    "resolve_import",
+    "score_feature",
 ]
 
 MAX_LABELS = 40
 MAX_HANDLERS = 30
 MAX_EXCERPT_LINES_PER_FILE = 40
 MAX_STYLE_LINE_CHARS = 160
+MAX_COMMITS = 30
+MAX_COMMIT_SUBJECT_CHARS = 120
+MAX_PROJECT_CHARS = 600
+MAX_FEATURES = 8
+MAX_FEATURE_LABELS = 12
+MAX_FEATURE_COMMITS = 6
 
 _IGNORED_DIR_NAMES: frozenset[str] = frozenset(
     {
@@ -504,21 +518,123 @@ def is_ui_file(path: str) -> bool:
     return False
 
 
-def extract_routes_from_path(path: str) -> str | None:
-    """Infer a URL route path from a framework page/route file path, or None."""
+_FRAMEWORK_DEPS: dict[str, str] = {
+    "next": "next",
+    "nuxt": "nuxt",
+    "nuxt3": "nuxt",
+    "@sveltejs/kit": "sveltekit",
+    "astro": "astro",
+    "@remix-run/react": "remix",
+    "@remix-run/node": "remix",
+    "@remix-run/dev": "remix",
+    "@react-router/dev": "remix",  # React Router v7 framework mode keeps the app/routes convention
+}
+
+
+def detect_frameworks(repo: Path) -> set[str] | None:
+    """File-routing frameworks declared in the repo's package.json files.
+
+    Returns None when the repo has no package.json at all (unknown stack: every convention stays allowed), and an
+    empty set for a JS app without file-based routing (Vite + React Router, CRA...), where ``pages/Foo.tsx`` is just a
+    component, not a URL.
+    """
+    try:
+        listed = git(repo, "ls-files", "--", "package.json", "*/package.json", "*/*/package.json")
+    except GitError:
+        return None
+    manifests = [p for p in listed.splitlines() if p and "node_modules" not in p]
+    if not manifests:
+        return None
+    found: set[str] = set()
+    for rel in manifests:
+        try:
+            data = json.loads((repo / rel).read_text(encoding="utf-8", errors="replace"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        for key in ("dependencies", "devDependencies", "peerDependencies"):
+            deps = data.get(key)
+            if isinstance(deps, dict):
+                found.update(_FRAMEWORK_DEPS[d] for d in deps if d in _FRAMEWORK_DEPS)
+    return found
+
+
+# <Route path="/x" element={<Page />}>, <Route element={<Page />} path="/x">, { path: "/x", element: <Page /> }
+_RE_ROUTE_PATH_FIRST = re.compile(
+    r"""<Route\b[^>]*?\bpath=\{?\s*["'`]([^"'`]+)["'`]\s*\}?[^>]*?\b(?:element|component|Component)=\{\s*<?\s*([A-Z][A-Za-z0-9_]*)"""
+)
+_RE_ROUTE_ELEMENT_FIRST = re.compile(
+    r"""<Route\b[^>]*?\b(?:element|component|Component)=\{\s*<?\s*([A-Z][A-Za-z0-9_]*)(?:(?!<Route\b).){0,200}?\bpath=\{?\s*["'`]([^"'`]+)["'`]""",
+    re.S,
+)
+_RE_ROUTE_OBJECT = re.compile(
+    r"""\bpath\s*:\s*["'`]([^"'`]+)["'`][^{}]{0,200}?\b(?:element|Component|component)\s*:\s*<?\s*([A-Z][A-Za-z0-9_]*)""",
+    re.S,
+)
+
+
+def _clean_router_path(raw: str) -> str | None:
+    p = raw.strip()
+    if not p or p == "*" or "://" in p:
+        return None
+    p = p.removesuffix("/*").removesuffix("*") or "/"
+    return p if p.startswith("/") else "/" + p
+
+
+def map_router_components(sources: Iterable[str]) -> dict[str, str]:
+    """Component name -> URL path from React Router / similar route tables (first declaration wins)."""
+    mapping: dict[str, str] = {}
+    for text in sources:
+        pairs: list[tuple[str, str]] = []
+        pairs += [(c, p) for p, c in _RE_ROUTE_PATH_FIRST.findall(text)]
+        pairs += _RE_ROUTE_ELEMENT_FIRST.findall(text)
+        pairs += [(c, p) for p, c in _RE_ROUTE_OBJECT.findall(text)]
+        for comp, raw in pairs:
+            path = _clean_router_path(raw)
+            if path and comp not in ("Navigate", "Redirect", "Outlet") and comp not in mapping:
+                mapping[comp] = path
+    return mapping
+
+
+def _router_sources(repo: Path) -> list[str]:
+    try:
+        listed = git(repo, "grep", "-l", "-E", r"<Route\b|createBrowserRouter|createRoutesFromElements|useRoutes\(",
+                     "--", "*.tsx", "*.jsx", "*.ts", "*.js")  # fmt: skip
+    except GitError:
+        return []  # git grep exits 1 when nothing matches
+    texts: list[str] = []
+    for rel in listed.splitlines()[:20]:
+        if not rel or is_ignored_path(rel):
+            continue
+        try:
+            texts.append((repo / rel).read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+    return texts
+
+
+def extract_routes_from_path(path: str, frameworks: set[str] | None = None) -> str | None:
+    """Infer a URL route path from a framework page/route file path, or None.
+
+    ``frameworks`` (from :func:`detect_frameworks`) restricts which file-routing conventions apply; None allows all.
+    """
     norm = _normalize_path(path)
     if not norm or is_ignored_path(norm):
         return None
 
+    def allowed(name: str) -> bool:
+        return frameworks is None or name in frameworks
+
     # SvelteKit: src/routes/**/+page.svelte
-    m = _RE_SVELTEKIT_ROUTE.match(norm)
+    m = _RE_SVELTEKIT_ROUTE.match(norm) if allowed("sveltekit") else None
     if m:
         raw_dir = m.group(1) or ""
         segs = [s for s in raw_dir.split("/") if s and not _RE_ROUTE_GROUP.match(s)]
         return "/" + "/".join(segs) if segs else "/"
 
     # Remix: app/routes/*.tsx (dots -> slashes, _index -> "/")
-    m = _RE_REMIX_ROUTE.match(norm)
+    m = _RE_REMIX_ROUTE.match(norm) if allowed("remix") else None
     if m and PurePosixPath(norm).stem != "page":
         rel = m.group(1)
         segs: list[str] = []
@@ -530,14 +646,14 @@ def extract_routes_from_path(path: str) -> str | None:
         return "/" + "/".join(segs) if segs else "/"
 
     # Next.js App Router: app/**/page.(tsx|jsx|ts|js|mdx)
-    m = _RE_NEXT_APP_ROUTE.match(norm)
+    m = _RE_NEXT_APP_ROUTE.match(norm) if allowed("next") else None
     if m:
         raw_dir = m.group(1) or ""
         segs = [s for s in raw_dir.split("/") if s and not _RE_ROUTE_GROUP.match(s)]
         return "/" + "/".join(segs) if segs else "/"
 
     # Astro: src/pages/**.astro
-    m = _RE_ASTRO_ROUTE.match(norm)
+    m = _RE_ASTRO_ROUTE.match(norm) if allowed("astro") else None
     if m:
         segs = [s for s in m.group(1).split("/") if s]
         if segs and segs[-1] == "index":
@@ -545,7 +661,7 @@ def extract_routes_from_path(path: str) -> str | None:
         return "/" + "/".join(segs) if segs else "/"
 
     # Nuxt: pages/**.vue
-    m = _RE_NUXT_ROUTE.match(norm)
+    m = _RE_NUXT_ROUTE.match(norm) if allowed("nuxt") else None
     if m:
         segs = [s for s in m.group(1).split("/") if s]
         if segs and segs[-1] == "index":
@@ -553,7 +669,7 @@ def extract_routes_from_path(path: str) -> str | None:
         return "/" + "/".join(segs) if segs else "/"
 
     # Next.js Pages Router: pages/**.(tsx|jsx|ts|js|mdx)
-    m = _RE_NEXT_PAGES_ROUTE.match(norm)
+    m = _RE_NEXT_PAGES_ROUTE.match(norm) if allowed("next") else None
     if m:
         segs = [s for s in m.group(1).split("/") if s]
         if not segs or segs[0] == "api" or any(s.startswith("_") for s in segs):
@@ -966,6 +1082,534 @@ def _read_untracked_lines(repo: Path, rel_path: str) -> list[str] | None:
     return raw.decode("utf-8", errors="replace").splitlines()
 
 
+_STYLE_EXTENSIONS: frozenset[str] = frozenset({".css", ".scss", ".sass", ".less"})
+_IMPORT_EXTENSIONS: tuple[str, ...] = (".tsx", ".ts", ".jsx", ".js", ".vue", ".svelte")
+_ROUTE_SOURCE_EXTENSIONS: frozenset[str] = frozenset(
+    {".tsx", ".ts", ".jsx", ".js", ".vue", ".svelte", ".astro", ".mdx"}
+)
+_GENERIC_ROUTE_STEMS: frozenset[str] = frozenset({"page", "+page", "index", "_index"})
+_README_CANDIDATES: tuple[str, ...] = (
+    "readme.md",
+    "readme",
+    "readme.markdown",
+    "readme.txt",
+    "readme.rst",
+)
+
+_RE_NOISE_COMMIT = re.compile(
+    r"^(?:wip|fixup!|squash!|merge |bump |chore\(deps\)|format|lint)",
+    re.IGNORECASE,
+)
+_RE_HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
+_RE_HTML_TAG = re.compile(r"<[^>]+>")
+_RE_MD_HEADING = re.compile(r"^\s*#+\s*")
+_RE_MD_LINK = re.compile(r"\[([^\]]+)\]\([^)]+\)")
+
+_RE_IMPORT_FROM = re.compile(
+    r"""(?m)^\s*import\s+(?:type\s+)?(?:[\w$*,\s{}]+?)\bfrom\s*["']([^"']+)["']"""
+)
+_RE_EXPORT_FROM = re.compile(
+    r"""(?m)^\s*export\s+(?:type\s+)?(?:\*(?:\s+as\s+[\w$]+)?|\{[^}]*\})\s*from\s*["']([^"']+)["']"""
+)
+_RE_IMPORT_SIDE_EFFECT = re.compile(r"""(?m)^\s*import\s*["']([^"']+)["']""")
+_RE_IMPORT_DYNAMIC = re.compile(
+    r"""\bimport\s*\(\s*(?:/\*.*?\*/\s*)?["']([^"']+)["']\s*\)"""
+)
+
+
+def _clean_commit_subject(raw: str) -> str | None:
+    subject = raw.strip()
+    if not subject or _RE_NOISE_COMMIT.match(subject):
+        return None
+    return subject[:MAX_COMMIT_SUBJECT_CHARS].rstrip()
+
+
+def _parse_commit_log(output: str) -> tuple[list[str], list[tuple[str, frozenset[str]]]]:
+    """Parse ``git log --no-merges --format=%x1e%s --name-only`` output."""
+    if not output:
+        return [], []
+    subjects: list[str] = []
+    entries: list[tuple[str, frozenset[str]]] = []
+    for chunk in output.split("\x1e")[1:]:
+        lines = chunk.splitlines()
+        if not lines:
+            continue
+        subject = _clean_commit_subject(lines[0])
+        if subject is None:
+            continue
+        touched = frozenset(_normalize_path(ln) for ln in lines[1:] if ln.strip())
+        subjects.append(subject)
+        entries.append((subject, touched))
+    return _dedupe_preserve(subjects, limit=MAX_COMMITS), entries
+
+
+def _clean_readme_text(raw: str, *, skip_title: str = "") -> str:
+    kept_lines: list[str] = []
+    in_fence = False
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(("```", "~~~")):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        lower = line.lower()
+        if "![" in line or "<img" in lower or "shields.io" in lower:
+            continue
+        kept_lines.append(line)
+
+    text = "\n".join(kept_lines)
+    text = _RE_HTML_COMMENT.sub(" ", text)
+    text = _RE_HTML_TAG.sub(" ", text)
+
+    cleaned_lines: list[str] = []
+    total_chars = 0
+    for line in text.splitlines():
+        line = _RE_MD_HEADING.sub("", line)
+        line = _RE_MD_LINK.sub(r"\1", line)
+        collapsed = " ".join(line.split())
+        if not collapsed or not any(ch.isalnum() for ch in collapsed):
+            continue
+        cleaned_lines.append(collapsed)
+        total_chars += len(collapsed) + 1
+        if total_chars > MAX_PROJECT_CHARS * 2:
+            break
+
+    if (
+        skip_title
+        and len(cleaned_lines) > 1
+        and cleaned_lines[0].casefold() == skip_title.casefold()
+    ):
+        cleaned_lines.pop(0)
+
+    return " ".join(cleaned_lines)
+
+
+def read_project_context(repo: Path) -> str:
+    """Build a compact description of the project (max 600 chars) from manifest + README.
+
+    Never raises; returns ``""`` on any error.
+    """
+    try:
+        repo_path = Path(repo)
+        if not repo_path.is_dir():
+            return ""
+
+        pkg_name = ""
+        pkg_desc = ""
+
+        pkg_json = repo_path / "package.json"
+        if pkg_json.is_file():
+            try:
+                data = json.loads(pkg_json.read_text(encoding="utf-8", errors="replace"))
+            except (OSError, ValueError):
+                data = None
+            if isinstance(data, dict):
+                raw_name = data.get("name")
+                raw_desc = data.get("description")
+                if isinstance(raw_name, str):
+                    pkg_name = " ".join(raw_name.split())
+                if isinstance(raw_desc, str):
+                    pkg_desc = " ".join(raw_desc.split())
+
+        if not pkg_name and not pkg_desc:
+            pyproject = repo_path / "pyproject.toml"
+            if pyproject.is_file():
+                try:
+                    toml_data = tomllib.loads(pyproject.read_text(encoding="utf-8", errors="replace"))
+                except (OSError, tomllib.TOMLDecodeError, ValueError):
+                    toml_data = None
+                if isinstance(toml_data, dict):
+                    proj = toml_data.get("project")
+                    if isinstance(proj, dict):
+                        raw_name = proj.get("name")
+                        raw_desc = proj.get("description")
+                        if isinstance(raw_name, str):
+                            pkg_name = " ".join(raw_name.split())
+                        if isinstance(raw_desc, str):
+                            pkg_desc = " ".join(raw_desc.split())
+
+        readme_text = ""
+        try:
+            root_files = {
+                entry.name.lower(): entry
+                for entry in repo_path.iterdir()
+                if entry.is_file()
+            }
+        except OSError:
+            root_files = {}
+
+        readme_file: Path | None = None
+        for cand in _README_CANDIDATES:
+            if cand in root_files:
+                readme_file = root_files[cand]
+                break
+
+        if readme_file is not None:
+            try:
+                with readme_file.open("r", encoding="utf-8", errors="replace") as fh:
+                    raw_readme = fh.read(16_384)
+                readme_text = _clean_readme_text(raw_readme, skip_title=pkg_name)
+            except OSError:
+                readme_text = ""
+
+        parts = [p for p in (pkg_name, pkg_desc, readme_text) if p]
+        if not parts:
+            return ""
+
+        result = " ".join(" - ".join(parts).split())
+        if len(result) > MAX_PROJECT_CHARS:
+            result = result[: MAX_PROJECT_CHARS - 3].rstrip() + "..."
+        return result
+    except Exception:
+        return ""
+
+
+def parse_import_specifiers(text: str) -> list[str]:
+    """Extract JS/TS/TSX import & re-export specifiers from source text in order."""
+    found: list[tuple[int, str]] = []
+    for pattern in (_RE_IMPORT_FROM, _RE_EXPORT_FROM, _RE_IMPORT_SIDE_EFFECT, _RE_IMPORT_DYNAMIC):
+        for match in pattern.finditer(text):
+            spec = match.group(1).strip()
+            if spec:
+                found.append((match.start(), spec))
+    found.sort(key=lambda item: item[0])
+    return _dedupe_preserve(spec for _, spec in found)
+
+
+def _join_posix_relative(base_parts: Sequence[str], rel_spec: str) -> str | None:
+    parts = list(base_parts)
+    for seg in rel_spec.split("/"):
+        if not seg or seg == ".":
+            continue
+        if seg == "..":
+            if not parts:
+                return None
+            parts.pop()
+        else:
+            parts.append(seg)
+    return "/".join(parts) if parts else None
+
+
+def resolve_import(spec: str, from_file: str, known_files: Iterable[str]) -> str | None:
+    """Resolve a relative or ``@/`` import specifier against ``known_files``."""
+    cleaned = spec.strip().split("?", 1)[0].split("#", 1)[0]
+    if not cleaned:
+        return None
+
+    if cleaned.startswith("@/"):
+        base = _join_posix_relative(["src"], cleaned[2:])
+    elif cleaned.startswith(("./", "../")) or cleaned in (".", ".."):
+        parent = PurePosixPath(_normalize_path(from_file)).parent
+        base_parts = [] if str(parent) in ("", ".") else list(parent.parts)
+        base = _join_posix_relative(base_parts, cleaned)
+    else:
+        return None
+
+    if not base:
+        return None
+
+    known_set = (
+        known_files
+        if isinstance(known_files, (set, frozenset))
+        else {_normalize_path(p) for p in known_files}
+    )
+
+    if base in known_set:
+        return base
+    for ext in _IMPORT_EXTENSIONS:
+        cand = f"{base}{ext}"
+        if cand in known_set:
+            return cand
+    for ext in _IMPORT_EXTENSIONS:
+        cand = f"{base}/index{ext}"
+        if cand in known_set:
+            return cand
+    if base.endswith(".js"):
+        stem = base[:-3]
+        for ext in (".ts", ".tsx"):
+            cand = f"{stem}{ext}"
+            if cand in known_set:
+                return cand
+    elif base.endswith(".jsx"):
+        cand = f"{base[:-4]}.tsx"
+        if cand in known_set:
+            return cand
+    return None
+
+
+def score_feature(
+    added: int,
+    new_files: int,
+    label_count: int,
+    commit_count: int,
+    route: str | None,
+) -> float:
+    """Compute a feature candidate's demo-worthiness score, rounded to 2 decimals."""
+    is_static = route is not None and not any(ch in route for ch in (":", "[", "*"))
+    raw = (
+        math.log2(1 + max(0, added))
+        + 1.5 * max(0, new_files)
+        + 0.4 * min(max(0, label_count), 10)
+        + 1.0 * min(max(0, commit_count), 4)
+        + (1.5 if route is not None else 0.0)
+        + (1.0 if is_static else 0.0)
+    )
+    return round(raw, 2)
+
+
+def _extract_primary_component(text: str) -> str | None:
+    for pattern in (_RE_COMP_FUNC, _RE_COMP_CONST, _RE_COMP_CLASS):
+        match = pattern.search(text)
+        if match:
+            name = match.group(1)
+            if name not in _NON_COMPONENT_NAMES:
+                return name
+    return None
+
+
+def _route_file_title(
+    path: str,
+    *,
+    from_router: bool,
+    added_lines_by_file: Mapping[str, Sequence[str]],
+    read_file: Callable[[str], str | None] | None,
+) -> str:
+    stem = PurePosixPath(path).stem
+    if from_router or stem.lower() not in _GENERIC_ROUTE_STEMS:
+        return stem
+    lines = added_lines_by_file.get(path)
+    if lines:
+        comp = _extract_primary_component("\n".join(lines))
+        if comp:
+            return comp
+    if read_file is not None:
+        text = read_file(path)
+        if text:
+            comp = _extract_primary_component(text)
+            if comp:
+                return comp
+    return stem
+
+
+def _make_repo_reader(repo: Path) -> Callable[[str], str | None]:
+    cache: dict[str, str | None] = {}
+
+    def _read(rel_path: str) -> str | None:
+        if rel_path not in cache:
+            full = repo / rel_path
+            try:
+                cache[rel_path] = (
+                    full.read_text(encoding="utf-8", errors="replace") if full.is_file() else None
+                )
+            except OSError:
+                cache[rel_path] = None
+        return cache[rel_path]
+
+    return _read
+
+
+def build_feature_candidates(
+    changed_files: Sequence[ChangedFile],
+    added_lines_by_file: Mapping[str, Sequence[str]],
+    *,
+    frameworks: set[str] | None = None,
+    router_map: Mapping[str, str] | None = None,
+    known_files: Collection[str] | None = None,
+    read_file: Callable[[str], str | None] | None = None,
+    commit_entries: Sequence[tuple[str, Collection[str]]] = (),
+    max_features: int = MAX_FEATURES,
+) -> list[FeatureCandidate]:
+    """Group changed UI files into scored, route-keyed ``FeatureCandidate`` objects."""
+    ui_changed = [
+        f
+        for f in changed_files
+        if f.status != "deleted" and not is_ignored_path(f.path) and (f.is_ui or f.is_route)
+    ]
+    if not ui_changed:
+        return []
+
+    known_set: set[str] = (
+        {_normalize_path(p) for p in known_files if p and not is_ignored_path(p)}
+        if known_files is not None
+        else set()
+    )
+    known_set.update(_normalize_path(f.path) for f in changed_files if f.status != "deleted")
+
+    # (a) path route, else (b) SPA router map
+    assigned: dict[str, tuple[str, str]] = {}
+    for f in ui_changed:
+        route = extract_routes_from_path(f.path, frameworks)
+        if route is not None:
+            title = _route_file_title(
+                f.path,
+                from_router=False,
+                added_lines_by_file=added_lines_by_file,
+                read_file=read_file,
+            )
+            assigned[f.path] = (route, title)
+            continue
+        if router_map:
+            posix = PurePosixPath(f.path)
+            if posix.suffix.lower() not in _STYLE_EXTENSIONS:
+                route = router_map.get(posix.stem)
+                if route is not None:
+                    assigned[f.path] = (route, posix.stem)
+
+    # (c) 2-level reverse import graph limited to known route files from (a)/(b)
+    unassigned_paths = {f.path for f in ui_changed if f.path not in assigned}
+    if unassigned_paths and read_file is not None:
+        route_files: list[tuple[str, str, str]] = []
+        seen_route_paths: set[str] = set()
+
+        for f in sorted(ui_changed, key=lambda cf: (-cf.added, cf.path)):
+            if f.path in assigned:
+                route, title = assigned[f.path]
+                route_files.append((f.path, route, title))
+                seen_route_paths.add(f.path)
+
+        unchanged_route_files: list[tuple[str, str, str]] = []
+        for path in sorted(known_set):
+            if path in seen_route_paths:
+                continue
+            posix = PurePosixPath(path)
+            if posix.suffix.lower() not in _ROUTE_SOURCE_EXTENSIONS:
+                continue
+            route = extract_routes_from_path(path, frameworks)
+            if route is not None:
+                title = _route_file_title(
+                    path,
+                    from_router=False,
+                    added_lines_by_file=added_lines_by_file,
+                    read_file=read_file,
+                )
+                unchanged_route_files.append((path, route, title))
+                seen_route_paths.add(path)
+                continue
+            if router_map:
+                route = router_map.get(posix.stem)
+                if route is not None:
+                    unchanged_route_files.append((path, route, posix.stem))
+                    seen_route_paths.add(path)
+
+        route_files.extend(unchanged_route_files)
+        all_route_file_paths = {r_path for r_path, _, _ in route_files}
+
+        resolved_imports_cache: dict[str, list[str]] = {}
+
+        def _get_imports(file_path: str) -> list[str]:
+            if file_path not in resolved_imports_cache:
+                text = read_file(file_path)
+                if not text:
+                    resolved_imports_cache[file_path] = []
+                else:
+                    targets: list[str] = []
+                    for spec in parse_import_specifiers(text):
+                        resolved = resolve_import(spec, file_path, known_set)
+                        if resolved is not None and resolved != file_path:
+                            targets.append(resolved)
+                    resolved_imports_cache[file_path] = _dedupe_preserve(targets)
+            return resolved_imports_cache[file_path]
+
+        # Depth 1
+        level1_by_route: list[tuple[str, str, list[str]]] = []
+        for r_path, route, title in route_files:
+            imports_1 = _get_imports(r_path)
+            level1_by_route.append((route, title, imports_1))
+            for target in imports_1:
+                if target in unassigned_paths and target not in assigned:
+                    assigned[target] = (route, title)
+
+        # Depth 2 (only if unassigned files remain)
+        if unassigned_paths - assigned.keys():
+            for route, title, imports_1 in level1_by_route:
+                for mid in imports_1:
+                    if mid in all_route_file_paths:
+                        continue
+                    if PurePosixPath(mid).suffix.lower() not in _IMPORT_EXTENSIONS:
+                        continue
+                    for target2 in _get_imports(mid):
+                        if target2 in unassigned_paths and target2 not in assigned:
+                            assigned[target2] = (route, title)
+
+    # Group files: merge by route when assigned, else (d) route=None keyed by file stem
+    groups: dict[tuple[str, str], list[ChangedFile]] = {}
+    group_meta: dict[tuple[str, str], tuple[str, str | None]] = {}
+    for f in sorted(ui_changed, key=lambda cf: (-cf.added, cf.path)):
+        if f.path in assigned:
+            route, title = assigned[f.path]
+            key = ("route", route)
+            if key not in group_meta:
+                group_meta[key] = (title, route)
+        else:
+            stem = PurePosixPath(f.path).stem
+            key = ("stem", stem)
+            if key not in group_meta:
+                group_meta[key] = (stem, None)
+        groups.setdefault(key, []).append(f)
+
+    def _is_style_only(group_files: Sequence[ChangedFile]) -> bool:
+        return all(PurePosixPath(cf.path).suffix.lower() in _STYLE_EXTENSIONS for cf in group_files)
+
+    has_non_style = any(not _is_style_only(g) for g in groups.values())
+
+    candidates: list[FeatureCandidate] = []
+    for key, group_files in groups.items():
+        if has_non_style and _is_style_only(group_files):
+            continue
+        title, route = group_meta[key]
+        sorted_files = sorted(group_files, key=lambda cf: (-cf.added, cf.path))
+        file_paths = [cf.path for cf in sorted_files]
+        added = sum(cf.added for cf in sorted_files)
+        new_files = sum(1 for cf in sorted_files if cf.status == "added")
+
+        raw_labels: list[str] = []
+        for cf in sorted_files:
+            lines = added_lines_by_file.get(cf.path, ())
+            if not lines:
+                continue
+            extracted = extract_from_added_lines(
+                cf.path,
+                lines,
+                is_added_file=(cf.status == "added"),
+            )
+            raw_labels.extend(extracted["labels"])
+        group_labels = _dedupe_preserve(
+            raw_labels,
+            case_insensitive=True,
+            limit=MAX_FEATURE_LABELS,
+        )
+
+        group_path_set = set(file_paths)
+        group_commits = _dedupe_preserve(
+            (subj for subj, touched in commit_entries if group_path_set.intersection(touched)),
+            limit=MAX_FEATURE_COMMITS,
+        )
+
+        score = score_feature(
+            added=added,
+            new_files=new_files,
+            label_count=len(group_labels),
+            commit_count=len(group_commits),
+            route=route,
+        )
+        candidates.append(
+            FeatureCandidate(
+                title=title,
+                route=route,
+                files=file_paths,
+                added=added,
+                new_files=new_files,
+                labels=group_labels,
+                commits=group_commits,
+                score=score,
+            )
+        )
+
+    candidates.sort(key=lambda c: (-c.score, -c.added, c.route or "", c.title))
+    return candidates[:max_features]
+
+
 def analyze_diff(
     repo: Path = Path("."),
     base: str = "main",
@@ -995,6 +1639,20 @@ def analyze_diff(
         repo_path, *common_git, "diff", "--no-ext-diff", "-U3", "-M", *diff_target
     )
 
+    try:
+        commit_log_out = git(
+            repo_path,
+            *common_git,
+            "log",
+            "--no-merges",
+            "--format=%x1e%s",
+            "--name-only",
+            f"{merge_base}..HEAD",
+        )
+    except GitError:
+        commit_log_out = ""
+    commits, commit_entries = _parse_commit_log(commit_log_out)
+
     statuses = parse_name_status(name_status_out)
     numstats = parse_numstat(numstat_out)
     added_lines_by_file = parse_added_lines_by_file(patch_out)
@@ -1009,6 +1667,7 @@ def analyze_diff(
             _normalize_path(p) for p in untracked_out.split("\0") if p
         ]
 
+    frameworks = detect_frameworks(repo_path)
     changed_files: list[ChangedFile] = []
     seen_paths: set[str] = set()
 
@@ -1017,7 +1676,7 @@ def analyze_diff(
             continue
         seen_paths.add(path)
         added, removed = numstats.get(path, (0, 0))
-        route = extract_routes_from_path(path)
+        route = extract_routes_from_path(path, frameworks)
         changed_files.append(
             ChangedFile(
                 path=path,
@@ -1039,7 +1698,7 @@ def analyze_diff(
             added_count = len(lines)
         else:
             added_count = 0
-        route = extract_routes_from_path(path)
+        route = extract_routes_from_path(path, frameworks)
         changed_files.append(
             ChangedFile(
                 path=path,
@@ -1056,7 +1715,7 @@ def analyze_diff(
     for f in changed_files:
         if f.status == "deleted" or not (f.is_ui or f.is_route):
             continue
-        route = extract_routes_from_path(f.path)
+        route = extract_routes_from_path(f.path, frameworks)
         if route is not None:
             file_route_candidates.append((f, route))
 
@@ -1092,7 +1751,37 @@ def analyze_diff(
         all_test_ids.extend(extracted["test_ids"])
         all_handlers.extend(extracted["handlers"])
 
-    routes = _dedupe_preserve([*path_routes, *line_routes])
+    # SPA routers (React Router...): a changed page component maps to the path its <Route> declares.
+    router_map = map_router_components(_router_sources(repo_path))
+    component_routes: list[str] = []
+    if router_map and not path_routes:
+        for f in sorted(changed_files, key=lambda f: (f.status == "deleted", -f.added, f.path)):
+            if f.status == "deleted" or not f.is_ui:
+                continue
+            route = router_map.get(PurePosixPath(f.path).stem)
+            if route is not None:
+                f.is_route = True
+                component_routes.append(route)
+
+    try:
+        tracked_out = git(repo_path, *common_git, "ls-files", "-z")
+        known_files = {_normalize_path(p) for p in tracked_out.split("\0") if p}
+    except GitError:
+        known_files = set()
+    known_files.update(untracked_paths)
+
+    features = build_feature_candidates(
+        changed_files,
+        added_lines_by_file,
+        frameworks=frameworks,
+        router_map=router_map,
+        known_files=known_files,
+        read_file=_make_repo_reader(repo_path),
+        commit_entries=commit_entries,
+    )
+    project = read_project_context(repo_path)
+
+    routes = _dedupe_preserve([*path_routes, *component_routes, *line_routes])
     components = _dedupe_preserve(all_components)
     labels = _dedupe_preserve(all_labels, case_insensitive=True, limit=MAX_LABELS)
     test_ids = _dedupe_preserve(all_test_ids)
@@ -1107,6 +1796,9 @@ def analyze_diff(
     return DiffSummary(
         base_ref=resolved_base,
         head_ref=head_ref,
+        project=project,
+        commits=commits,
+        features=features,
         files=changed_files,
         components=components,
         labels=labels,

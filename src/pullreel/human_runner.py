@@ -40,6 +40,7 @@ from pullreel.models import (
     Storyboard,
     TelemetryFrame,
 )
+from pullreel.progress import Reporter, say, silent
 
 VIEWPORT = (1280, 800)
 SCALE = 2.0
@@ -128,6 +129,85 @@ def resolve_locator(page: Page, loc: Locator) -> PWLocator:
     return target.first
 
 
+async def find_locator(page: Page, loc: Locator) -> PWLocator:
+    """Like :func:`resolve_locator`, but a ``text`` locator prefers an *exact* text match ("Analyse" must not land
+    on "Analyse défensive détaillée" just because it comes first in the DOM)."""
+    if loc.strategy == "text":
+        exact = page.get_by_text(loc.value, exact=True)
+        with contextlib.suppress(PlaywrightError):
+            if await exact.count() > 0:
+                return exact.first
+    return resolve_locator(page, loc)
+
+
+# Climb from a label (column header, title...) to the block that holds the result, so `show` frames the whole table /
+# chart / card rather than a 20-px header cell. Stops before giant layout wrappers.
+_REGION_JS = """
+(el) => {
+  const big = (r) => r.width >= 360 && r.height >= 150;
+  const huge = (r) => r.width > innerWidth * 0.92 && r.height > innerHeight * 0.92;
+  const preferred = (e) => /^(TABLE|SECTION|ARTICLE|FIGURE|FORM|UL|OL)$/.test(e.tagName)
+    || ['table', 'grid', 'region', 'figure', 'list', 'dialog'].includes(e.getAttribute('role') || '');
+  let e = el, best = el;
+  for (let i = 0; i < 8 && e && e !== document.body; i++, e = e.parentElement) {
+    const r = e.getBoundingClientRect();
+    if (huge(r)) break;
+    best = e;
+    if (big(r) && (preferred(e) || i >= 2)) break;
+  }
+  const r = best.getBoundingClientRect();
+  return [r.x, r.y, r.width, r.height];
+}
+"""
+
+
+async def result_region(target: PWLocator, fallback: Box) -> Box:
+    """Bounding box (CSS px, viewport) of the result area around ``target``, clamped to the viewport."""
+    try:
+        x, y, w, h = await target.evaluate(_REGION_JS)
+    except PlaywrightError:
+        return fallback
+    x0, y0 = max(0.0, x), max(0.0, y)
+    x1, y1 = min(float(VIEWPORT[0]), x + w), min(float(VIEWPORT[1]), y + h)
+    if x1 - x0 < 8 or y1 - y0 < 8:
+        return fallback
+    return (x0, y0, x1 - x0, y1 - y0)
+
+
+# [visible text length, element count]: the page is "ready" once this stops changing.
+_CONTENT_PROBE_JS = (
+    "() => [document.body ? document.body.innerText.trim().length : 0,"
+    " document.body ? document.body.getElementsByTagName('*').length : 0]"
+)
+
+
+async def wait_for_content(page: Page, *, timeout_s: float = 15.0, quiet_s: float = 1.2) -> bool:
+    """Wait until the page shows text and its DOM has stopped changing for ``quiet_s``.
+
+    SPAs often render nothing until auth/data calls resolve (or time out): `load` and `networkidle` fire on an empty
+    shell. Returns False if the page never settled within ``timeout_s`` (we go on anyway).
+    """
+    with contextlib.suppress(PlaywrightError):
+        await page.wait_for_load_state("networkidle", timeout=3000)
+    deadline = time.monotonic() + timeout_s
+    last: list[int] | None = None
+    stable_since: float | None = None
+    while time.monotonic() < deadline:
+        try:
+            sig = await page.evaluate(_CONTENT_PROBE_JS)
+        except PlaywrightError:  # navigation in progress
+            sig = None
+        now = time.monotonic()
+        if sig and sig[0] > 0 and sig == last:
+            if stable_since is not None and now - stable_since >= quiet_s:
+                return True
+        else:
+            stable_since = now
+        last = sig
+        await asyncio.sleep(0.3)
+    return False
+
+
 @contextlib.contextmanager
 def _fine_timer() -> Iterator[None]:
     """Ask Windows for 1 ms timer resolution while recording (no-op elsewhere)."""
@@ -170,10 +250,9 @@ async def launch_chromium(pw: Playwright, *, headed: bool, progress: ProgressFn 
 class HumanRunner:
     """Executes a storyboard on a page with human pacing while logging camera intent."""
 
-    def __init__(self, page: Page, rng: random.Random, progress: ProgressFn | None = None) -> None:
+    def __init__(self, page: Page, rng: random.Random) -> None:
         self.page = page
         self.rng = rng
-        self.progress = progress or (lambda _msg: None)
         w, h = VIEWPORT
         self.state = _State(mouse_x=0.62 * w, mouse_y=0.78 * h)
         self.telemetry: list[TelemetryFrame] = []
@@ -212,7 +291,7 @@ class HumanRunner:
 
     # ------------------------------------------------------------------ locators
     async def _element_box(self, index: int, loc: Locator) -> tuple[PWLocator, Box]:
-        target = resolve_locator(self.page, loc)
+        target = await find_locator(self.page, loc)
         try:
             await target.wait_for(state="visible", timeout=6000)
             await target.scroll_into_view_if_needed(timeout=3000)
@@ -303,16 +382,25 @@ class HumanRunner:
 
     # ------------------------------------------------------------------ steps
     async def run_step(self, index: int, step: ActionStep) -> None:
-        self.progress(f"step {index + 1}: {step.action}" + (f" {step.locator.describe()}" if step.locator else ""))
         box: Box | None = None
         target: PWLocator | None = None
         if step.locator is not None:
             target, box = await self._element_box(index, step.locator)
-        self._set_camera(step, box)
+        if step.action == "show" and target is not None and box is not None:
+            region = await result_region(target, box)
+            s = self.state
+            s.camera_mode, s.focus_box = "focus", region
+            s.target_zoom = step.camera.zoom if step.camera.zoom > 1.0 else 1.35
+        else:
+            self._set_camera(step, box)
 
         match step.action:
             case "wait":
                 pass
+            case "show":
+                assert box is not None
+                # Presenter gesture: glide to the label of the result area, slower than a click, never clicking.
+                await self.move_to(*self._aim(box), target_width=max(box[2], 160.0))
             case "hover":
                 assert box is not None
                 await self.move_to(*self._aim(box), target_width=box[2])
@@ -372,30 +460,36 @@ async def record(
     *,
     headed: bool = False,
     seed: int | None = None,
-    progress: ProgressFn | None = None,
+    report: Reporter = silent,
+    auth: Path | None = None,
 ) -> Recording:
-    """Open ``url``, play ``storyboard`` like a human and return the captured recording."""
+    """Open ``url``, play ``storyboard`` like a human and return the captured recording.
+
+    ``auth`` is a Playwright storage-state file (cookies + localStorage) saved by ``pullreel login``.
+    """
     work_dir.mkdir(parents=True, exist_ok=True)
-    say = progress or (lambda _msg: None)
+    n_steps = len(storyboard.steps)
+    say(report, "recording", "start", "launching Chromium (Retina 2x)", 0, n_steps)
     rng = random.Random(seed)
     with _fine_timer():
         async with async_playwright() as pw:
-            browser = await launch_chromium(pw, headed=headed, progress=say)
+            browser = await launch_chromium(pw, headed=headed, progress=lambda m: say(report, "recording", detail=m))
             try:
                 context = await browser.new_context(
                     viewport={"width": VIEWPORT[0], "height": VIEWPORT[1]},
                     device_scale_factor=SCALE,
                     color_scheme="dark",
                     reduced_motion="no-preference",
+                    storage_state=str(auth) if auth else None,
                 )
                 page = await context.new_page()
-                say(f"opening {url}")
+                say(report, "recording", detail=f"opening {url}")
                 await page.goto(url, wait_until="load")
-                with contextlib.suppress(PlaywrightError):
-                    await page.wait_for_load_state("networkidle", timeout=4000)
+                say(report, "recording", detail="waiting for the page to finish rendering")
+                await wait_for_content(page)
                 await page.evaluate("document.fonts ? document.fonts.ready.then(() => true) : true")
 
-                runner = HumanRunner(page, rng, say)
+                runner = HumanRunner(page, rng)
                 await page.mouse.move(runner.state.mouse_x, runner.state.mouse_y)
 
                 cap = _Capture(work_dir=work_dir)
@@ -420,7 +514,12 @@ async def record(
                 sampler = asyncio.create_task(runner.sample_forever())
                 try:
                     for i, step in enumerate(storyboard.steps):
+                        what = f"{step.action} {step.locator.describe()}" if step.locator else step.action
+                        if step.input_value and step.action == "fill":
+                            what += f" ← {step.input_value!r}"
+                        say(report, "recording", detail=f"step {i + 1}/{n_steps} · {what}", completed=i, total=n_steps)
                         await runner.run_step(i, step)
+                    say(report, "recording", detail="closing hold", completed=n_steps, total=n_steps)
                     await runner.final_hold(storyboard.steps)
                 finally:
                     runner.stop_sampling()
@@ -447,6 +546,8 @@ async def record(
         t_end=t_end,
     )
     recording.save_json(work_dir / "recording.json")
+    fps = len(frames) / max(recording.duration, 1e-6)
+    say(report, "recording", "done", f"{recording.duration:.1f}s of footage · {len(frames)} captures ({fps:.0f}/s at 2560x1600)")
     return recording
 
 
@@ -457,6 +558,7 @@ def record_sync(
     *,
     headed: bool = False,
     seed: int | None = None,
-    progress: ProgressFn | None = None,
+    report: Reporter = silent,
+    auth: Path | None = None,
 ) -> Recording:
-    return asyncio.run(record(url, storyboard, work_dir, headed=headed, seed=seed, progress=progress))
+    return asyncio.run(record(url, storyboard, work_dir, headed=headed, seed=seed, report=report, auth=auth))

@@ -44,7 +44,25 @@ uv run pullreel demo
 
 ## Use it on your branch
 
-Start your dev server, then point PullReel at it:
+Start your dev server, then from your project folder just run:
+
+```bash
+pullreel
+```
+
+The assistant asks which AI should direct (a local Ollama model, or a cloud provider with your API key — kept only if you say so, in your user settings, never in the repo), finds your running dev server, then analyzes the branch and lists **every interesting scenario**: the Scout's picks are starred and pre-checked, every other candidate stays selectable, and **✍ Write my own scenario…** lets you describe exactly what to show. Select several with the space bar and it films one video per scenario into `pullreel-out/` (`01-coaching.mp4`, `02-…`). If the app asks for a login, it offers to sign you in first.
+
+```text
+? Which scenarios should I film?  (space = select · a = all · enter = confirm)
+ » ◉ ★ Coaching analytics  /coaching  — player combinations and match situations
+   ◉ ★ Team defense  /statequipe  — new Analyse tab from opponent shots
+   ○   StatJoueursPage  /statjoueurs  — Page Adversaires, gestion des joueurs
+   ○   SettingPage  /settings  — fiche de match partageable et réglages
+     ───────────
+   ○ ✍  Write my own scenario…
+```
+
+Prefer flags (scripts, CI)? Everything is also available non-interactively:
 
 ```bash
 pullreel record --url http://localhost:3000 --base main --out pr-demo.gif
@@ -53,9 +71,31 @@ pullreel record --url http://localhost:3000 --base main --out pr-demo.gif
 1. **Diff** — inspects `merge-base(base, HEAD)` against your working tree (including uncommitted and untracked files), ignoring lockfiles and build artifacts, to extract changed routes, components, labels, test IDs, and handlers.
 2. **Storyboard** — opens the app, captures Playwright's ARIA snapshot and visible interactive elements, and asks the LLM for a grounded 5–12 s storyboard focused on the delta.
 3. **Human-paced recording** — drives headless Chromium at 2x Retina with curved mouse paths, natural typing cadence, CDP screencast capture, and 60 Hz telemetry.
-4. **Cinematic render** — applies a spring camera, synthetic cursor, click ripples, and studio chassis, then encodes a 60 fps H.264 MP4 and an adaptive GitHub-ready GIF (< 5 MB), alongside `<stem>-poster.png` and `<stem>.storyboard.json`.
+4. **Cinematic render** — applies a spring camera, synthetic cursor, click ripples, and studio chassis, then encodes a 60 fps H.264 MP4 and an adaptive GitHub-ready GIF (< 10 MB, GitHub's limit), alongside `<stem>-poster.png` and `<stem>.storyboard.json`.
 
 Drag `pr-demo.gif` (or the sharper `pr-demo.mp4` — GitHub plays it inline) into your PR description.
+
+### Choosing what to film
+
+Before writing any storyboard, a **Scout** step reads the project description (package.json, README), the commit messages and the *feature candidates* — changed files grouped by the page where they show up (file-based routes, React Router `<Route>` tables and their imports), scored by size, new files, new UI labels and commits. It picks the most demo-worthy, user-visible changes, then each storyboard is planned on **that feature's own page**.
+
+```bash
+pullreel record --url http://localhost:3000 --scenarios 3      # 3 features -> pr-demo-1.gif, pr-demo-2.gif, pr-demo-3.gif
+pullreel record --url http://localhost:3000 --focus "global search"   # you choose the feature
+pullreel diff --prompt                                            # see the candidates and commits the AI receives
+pullreel record --url http://localhost:3000 --scenarios all --director composer   # every feature, no AI at all
+```
+
+### Stories, not click tours
+
+Every scenario is directed as a short story that sells one feature: an establishing shot, a first use followed by a **`show` payoff** (the camera frames the table / chart / card that changed, the cursor points at it like a presenter), 2–4 **escalations** of the same feature, a **money shot** held longer, then a wide hold — 15–30 s, never wandering off to another page.
+
+Two directors produce it, and the better film wins (`--director auto`, the default):
+
+- **AI director** — writes a draft, rehearses it on the live app while observing what each click changed (*"a table 'On court' appeared, 2 → 4 → 8 rows"*), then rewrites the story with that knowledge.
+- **Automatic composer** — explores the feature page by itself: finds groups of look-alike controls (player chips, filters, options, tabs — never the sidebar, never destructive buttons), clicks them one after another, keeps the group that drives a visible result and composes the escalating story from it. Deterministic, fast, no model needed (`--director composer`); also the safety net when an AI story is thin or fails.
+
+Each rehearsed story gets a quality score (actions that change something, payoff shots, escalation, length, staying on the page); in `auto` mode a thin AI story is replaced by the composed one.
 
 Want to review or tweak the shots before recording?
 
@@ -65,12 +105,25 @@ pullreel plan --url http://localhost:3000 --base main -o storyboard.json
 pullreel record --url http://localhost:3000 -s storyboard.json --out pr-demo.gif
 ```
 
+### Apps behind a login
+
+PullReel never types credentials, and stops with a clear message when it lands on a login form instead of letting a model invent a password. Sign in once, yourself:
+
+```bash
+pullreel login --url http://localhost:3000
+```
+
+A real browser window opens; sign in however you normally do (password, Google, SSO), then press Enter in the terminal or just close the window. PullReel saves only the resulting session — cookies, localStorage and IndexedDB — to `.pullreel/auth.json`, inside a folder that git-ignores itself. `record` and `plan` pick it up automatically (or pass `--auth FILE`). Delete the file to sign out; if the session expires, PullReel tells you to run `login` again.
+
 ## Commands
 
 | Command | Purpose |
 | --- | --- |
+| `pullreel` (or `pullreel start`) | Interactive assistant: choose the AI, review every scenario, multi-select or write your own, film them. |
 | `pullreel record --url URL` | Full pipeline: diff, plan (or `-s FILE`), record, render MP4/GIF, poster, and storyboard JSON. |
 | `pullreel plan --url URL -o FILE` | Dry run: analyze the branch, ground the storyboard against the live page, write JSON. |
+| `pullreel models` | List AI providers and whether each is ready (local server running, API key found). |
+| `pullreel login --url URL` | Sign in once in a visible browser; saves only the session for `record` / `plan`. |
 | `pullreel render DIR_OR_JSON` | Re-render a saved `--keep-frames` recording without launching a browser. |
 | `pullreel diff [--base main]` | Inspect what PullReel extracted from the branch (`--prompt` prints the exact LLM input). |
 | `pullreel demo [-o pullreel-out]` | Record and render the bundled demo page with no LLM or project setup. |
@@ -79,20 +132,24 @@ Passing `--out pr-demo.gif` writes both `pr-demo.mp4` and `pr-demo.gif`. Passing
 
 ## Models
 
-Set `--model` (or `PULLREEL_MODEL`) using a provider prefix. The default is `ollama/qwen2.5-coder:7b`; a bare model name (`llama3.2`) means Ollama.
+Set `--model` (or `PULLREEL_MODEL`) using a provider prefix. The default is `ollama/qwen2.5-coder:7b`; a bare model name (`llama3.2`) means Ollama. Run `pullreel models` to see which providers are ready on your machine (keys are detected, never displayed).
 
-| Prefix | Default endpoint | Auth / notes |
-| --- | --- | --- |
-| `ollama/<model>` | `http://localhost:11434` (`OLLAMA_HOST`) | Default. Local, no key required. |
-| `lmstudio/<model>` | `http://localhost:1234/v1` | Local OpenAI-compatible server. |
-| `openai/<model>` | OpenAI API | `OPENAI_API_KEY` |
-| `openrouter/<model>` | OpenRouter API | `OPENROUTER_API_KEY` |
-| `groq/<model>` | Groq API | `GROQ_API_KEY` |
+| Prefix | Default model | Key | Notes |
+| --- | --- | --- | --- |
+| `ollama/<model>` | `qwen2.5-coder:7b` | — | Default. Local; native `/api/chat` with the JSON schema as grammar-constrained output, 16k context, thinking off. |
+| `lmstudio/<model>` | — | — | Local OpenAI-compatible server (`localhost:1234`). |
+| `anthropic/<model>` | `claude-sonnet-5-5` | `ANTHROPIC_API_KEY` | Claude via the Messages API, answer forced through a tool with our schema. |
+| `openai/<model>` | — | `OPENAI_API_KEY` | `json_schema` structured output. |
+| `gemini/<model>` | — | `GEMINI_API_KEY` / `GOOGLE_API_KEY` | Google's OpenAI-compatible endpoint. |
+| `mistral/<model>` | — | `MISTRAL_API_KEY` | |
+| `deepseek/<model>` | — | `DEEPSEEK_API_KEY` | |
+| `openrouter/<model>` | — | `OPENROUTER_API_KEY` | Hundreds of models behind one key. |
+| `groq/<model>` | — | `GROQ_API_KEY` | Very fast inference. |
 
-Override any endpoint or key with `--base-url` (`PULLREEL_BASE_URL`) and `--api-key` (`PULLREEL_API_KEY`). On Ollama, PullReel calls the native `/api/chat` endpoint with the `Storyboard` JSON schema as grammar-constrained structured output, a 16k context window, and thinking disabled.
+`--api-key` (or `PULLREEL_API_KEY`) overrides the key and `--base-url` (`PULLREEL_BASE_URL`) the endpoint. PullReel only reads keys from your environment and never writes them to disk. OpenAI-compatible endpoints get the strictest output format they accept (`json_schema`, then `json_object`, then plain text).
 
 ```bash
-OPENAI_API_KEY=sk-... pullreel record --url http://localhost:3000 --model openai/gpt-4o-mini
+ANTHROPIC_API_KEY=sk-ant-... pullreel record --url http://localhost:3000 --model anthropic
 PULLREEL_MODEL=ollama/qwen2.5-coder:7b pullreel plan --url http://localhost:3000
 ```
 
@@ -106,7 +163,7 @@ app URL  ──> Playwright ARIA snapshot ───────┘              
                                                             └─── rehearsal & grounding loop (<=3x)
                                                                                     │
   MP4 + GIF <── exporter (ffmpeg) <── cinema_engine <── human_runner <──────────────┘
-                H.264 + <5 MB GIF     spring camera     Chromium 2x, CDP screencast,
+                H.264 + <10 MB GIF    spring camera     Chromium 2x, CDP screencast,
                                       cursor, frame     60 Hz telemetry
 ```
 
@@ -116,7 +173,7 @@ app URL  ──> Playwright ARIA snapshot ───────┘              
 | `src/pullreel/storyboard_agent.py` | Live ARIA snapshot, LLM prompt & structured output, normalization, Pydantic validation, pacing rules, and live rehearsal/grounding. |
 | `src/pullreel/human_runner.py` | 2x Retina Chromium driver, CDP `Page.startScreencast`, Bézier mouse & typing simulation, 60 Hz telemetry. |
 | `src/pullreel/cinema_engine.py` | Spring camera solver, 8x supersampled cursor sprite, click squash/ripple, and dark studio compositing. |
-| `src/pullreel/exporter.py` | FFmpeg H.264 MP4 (`crf 18`, 60 fps, `faststart`), two-stage palette GIF under 5 MB, and PNG poster export. |
+| `src/pullreel/exporter.py` | FFmpeg H.264 MP4 (`crf 18`, 60 fps, `faststart`), two-stage palette GIF under 10 MB, and PNG poster export. |
 | `src/pullreel/models.py` | Pydantic contracts (`DiffSummary`, `Storyboard`, `Recording`, `StudioTheme`, `RenderSettings`). |
 | `src/pullreel/cli.py` | Typer CLI (`record`, `plan`, `render`, `diff`, `demo`) and Rich progress output. |
 
@@ -184,7 +241,7 @@ PullReel directs the LLM to target only semantic locators (`role` + `name`, `lab
 - **Ollama not running**: Start the daemon with `ollama serve`.
 - **Model not pulled**: Run `ollama pull qwen2.5-coder:7b` (or pull whichever model you pass to `--model`).
 - **Small GPU (e.g. 4 GB VRAM)**: Stick to 7B models. On a 4 GB laptop GPU, local 26B models took 50–175 s just to plan; 7B models are substantially faster.
-- **Typical timings & sizes**: `pullreel demo` runs in about 20 s on a laptop (~1 MB for a 6.7 s 60 fps MP4, ~4.7 MB GIF). GIF export starts at 960 px / 30 fps and adapts width (down to 720 px) then fps to stay under 5 MB.
+- **Typical timings & sizes**: `pullreel demo` runs in about 20 s on a laptop (~1 MB for a 6.7 s 60 fps MP4, ~4.7 MB GIF). GIF export starts at 960 px / 30 fps and adapts width (down to 720 px) then fps to stay under 9.5 MB (GitHub accepts GIFs up to 10 MB).
 
 </details>
 
@@ -193,7 +250,6 @@ PullReel directs the LLM to target only semantic locators (`role` + `name`, `lab
 Planned next, not yet implemented:
 
 - GitHub Action that comments the rendered demo GIF directly on pull requests
-- Pre-recording auth / login steps for authenticated apps
 - Additional studio themes (including a light studio backdrop)
 - Multi-page navigation flows
 
@@ -204,7 +260,7 @@ uv sync
 uv run pytest
 ```
 
-39 tests cover the diff analyzer (including real temporary git repos), the storyboard agent and the CLI helpers.
+74 tests cover the diff analyzer (including real temporary git repos), the storyboard agent and AI providers, the automatic composer, login handling, the interactive assistant and the CLI helpers.
 
 To regenerate the README comparison GIFs:
 

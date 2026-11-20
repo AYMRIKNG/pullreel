@@ -18,8 +18,8 @@ import numpy as np
 from numpy.typing import NDArray
 
 GIF_START_WIDTH = 960
-GIF_MIN_WIDTH = 720
-GIF_MIN_FPS = 12
+GIF_MIN_WIDTH = 640
+GIF_MIN_FPS = 10
 
 
 class ExportError(RuntimeError):
@@ -126,7 +126,14 @@ def export_mp4(
     return out_path
 
 
-def export_gif(mp4_path: Path, out_path: Path, *, fps: int = 30, max_mb: float = 5.0) -> GifResult:
+def export_gif(
+    mp4_path: Path,
+    out_path: Path,
+    *,
+    fps: int = 30,
+    max_mb: float = 9.5,
+    on_pass: Callable[[int, int, int, GifResult | None], None] | None = None,
+) -> GifResult:
     """Two-stage palette GIF (palettegen stats_mode=diff + bayer dithering), shrunk until it fits ``max_mb``.
 
     GIF size grows roughly with width^2 * fps, so after the first pass the next settings are estimated from the
@@ -134,7 +141,9 @@ def export_gif(mp4_path: Path, out_path: Path, *, fps: int = 30, max_mb: float =
     """
     width, rate = GIF_START_WIDTH, fps
     result: GifResult | None = None
-    for _ in range(4):
+    for attempt in range(1, 5):
+        if on_pass:
+            on_pass(attempt, width, rate, None)
         vf = (
             f"fps={rate},scale={width}:-2:flags=lanczos,split[s0][s1];"
             "[s0]palettegen=stats_mode=diff[p];"
@@ -144,6 +153,8 @@ def export_gif(mp4_path: Path, out_path: Path, *, fps: int = 30, max_mb: float =
               "-vf", vf, "-loop", "0", str(out_path)])  # fmt: skip
         size_mb = out_path.stat().st_size / 1_048_576
         result = GifResult(out_path, width, rate, size_mb, size_mb <= max_mb)
+        if on_pass:
+            on_pass(attempt, width, rate, result)
         if result.fits or (width <= GIF_MIN_WIDTH and rate <= GIF_MIN_FPS):
             break
         budget = 0.9 * max_mb / size_mb  # how much of the current pixel*fps rate we can keep

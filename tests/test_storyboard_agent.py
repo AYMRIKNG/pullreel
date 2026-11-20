@@ -53,8 +53,8 @@ def test_polish_enforces_opening_closing_and_budget() -> None:
         ],
     )  # fmt: skip
     out, notes = polish(sb, max_seconds=8.0)
-    assert out.steps[0].action == "wait" and out.steps[0].dwell_after_ms == 400
-    assert out.steps[-1].action == "wait" and out.steps[-1].dwell_after_ms == 1000
+    assert out.steps[0].action == "wait" and out.steps[0].dwell_after_ms == 800
+    assert out.steps[-1].action == "wait" and out.steps[-1].dwell_after_ms == 1500
     assert out.steps[1].camera.mode == "focus"  # fill forced into focus
     assert out.steps[2].camera.zoom == 1.9  # clamped
     assert out.steps[2].dwell_after_ms < 9000
@@ -88,3 +88,31 @@ def test_parse_model_spec(monkeypatch: pytest.MonkeyPatch) -> None:
     assert (cfg.model, cfg.base_url, cfg.api_key) == ("gpt-4o-mini", "https://api.openai.com/v1", "sk-test")
     monkeypatch.setenv("OLLAMA_HOST", "127.0.0.1:9999")
     assert parse_model_spec("ollama/x").base_url == "http://127.0.0.1:9999/v1"
+
+
+def test_polish_makes_payoff_shots_readable_and_allows_real_stories() -> None:
+    sb = Storyboard(
+        feature_summary="Compare lineups",
+        steps=[
+            ActionStep(action="wait", camera=Camera(mode="wide"), dwell_after_ms=800),
+            ActionStep(action="click", locator=Locator(strategy="text", value="Elias"),
+                       camera=Camera(mode="focus", zoom=1.7), dwell_after_ms=100),
+            ActionStep(action="show", locator=Locator(strategy="text", value="Sur le terrain"),
+                       camera=Camera(mode="wide"), dwell_after_ms=300),
+        ] + [ActionStep(action="show", locator=Locator(strategy="text", value="Écart"),
+                        camera=Camera(mode="focus", zoom=1.4), dwell_after_ms=1500)] * 8,
+    )  # fmt: skip
+    out, _ = polish(sb)
+    click, show = out.steps[1], out.steps[2]
+    assert click.dwell_after_ms >= 500  # the UI gets time to react
+    assert show.camera.mode == "focus" and 1.15 <= show.camera.zoom <= 1.5 and show.dwell_after_ms >= 1000
+    assert all(s.dwell_after_ms == 1500 for s in out.steps[3:11])  # a ~20 s story is not squeezed any more
+
+
+def test_normalize_maps_highlight_to_show_and_drops_targetless_show() -> None:
+    raw = {"feature_summary": "x", "steps": [
+        {"action": "highlight", "locator": {"strategy": "text", "value": "Sur le terrain"}},
+        {"action": "show", "locator": None},
+    ]}  # fmt: skip
+    sb = Storyboard.model_validate(normalize_raw(raw))
+    assert [s.action for s in sb.steps] == ["show", "wait"]

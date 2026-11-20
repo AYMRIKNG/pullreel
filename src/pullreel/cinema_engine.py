@@ -257,8 +257,12 @@ class CinemaEngine:
         zoom = min(2.0, max(1.0, tf.target_zoom))
         if tf.focus_box is not None:
             bx, by, bw, bh = tf.focus_box
-            cx = 0.8 * (bx + bw / 2) + 0.2 * mx
-            cy = 0.8 * (by + bh / 2) + 0.2 * my
+            # Never crop the subject: a big result area (table, chart) gets a wider shot that fits it whole.
+            fit = min(0.94 * self.vw / max(bw, 1.0), 0.94 * self.vh / max(bh, 1.0))
+            zoom = max(1.0, min(zoom, fit))
+            pull = 0.2 if bw * bh < 0.08 * self.vw * self.vh else 0.0  # big areas: stay centred on them
+            cx = (1 - pull) * (bx + bw / 2) + pull * mx
+            cy = (1 - pull) * (by + bh / 2) + pull * my
         elif tf.camera_mode == "pan" and zoom > 1.0:
             cx, cy = prev
             dzx = self.settings.pan_deadzone * self.vw / zoom
